@@ -2,13 +2,12 @@
   "name": "cordova-websocket-server",
   "version": "1.0.0",
   "description": "Cordova WebSocket Server Plugin",
-  "cordova": {
-    "id": "cordova-websocket-server",
-    "platforms": [
-      "android",
-      "ios"
-    ]
-  },
+  "license": "MIT",
+  "files": [
+    "src",
+    "www",
+    "plugin.xml"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/raghu2x/cordova-websocket-server.git"
@@ -27,9 +26,12 @@
     "name": "Raghvendra Yadav",
     "url": "https://github.com/raghu2x"
   },
-  "license": "MIT",
   "bugs": {
     "url": "https://github.com/raghu2x/cordova-websocket-server/issues"
   },
-  "homepage": "https://github.com/raghu2x/cordova-websocket-server"
+  "homepage": "https://github.com/raghu2x/cordova-websocket-server",
+  "platforms": [
+    "android",
+    "ios"
+  ]
 }
