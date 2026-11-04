@@ -24,6 +24,15 @@ private class WSConnection: Hashable {
     private var fragmentBuffer: Data = Data()
     private var fragmentOpcode: WSOpcode = .textFrame
     private var isFragmenting: Bool = false
+    private var didNotifyClose: Bool = false
+
+    /// Largest message (single frame or reassembled fragments) accepted from a client.
+    static let maxPayloadSize = 16 * 1024 * 1024
+
+    /// Close codes an endpoint may send (RFC 6455 §7.4 + IANA registry).
+    static func isValidCloseCode(_ code: Int) -> Bool {
+        return (1000...1003).contains(code) || (1007...1014).contains(code) || (3000...4999).contains(code)
+    }
 
     weak var delegate: WSConnectionDelegate?
 
@@ -51,10 +60,14 @@ private class WSConnection: Hashable {
 
     func close(code: Int = 1000, reason: String? = nil) {
         var payload = Data()
-        var c = UInt16(code).bigEndian
+        var c = UInt16(WSConnection.isValidCloseCode(code) ? code : 1000).bigEndian
         payload.append(contentsOf: withUnsafeBytes(of: &c) { Array($0) })
-        if let r = reason, let rd = r.data(using: .utf8) {
-            payload.append(rd)
+        if let r = reason {
+            // Control frame payload is limited to 125 bytes, 2 of which are the code.
+            // Drop whole characters so the reason stays valid UTF-8.
+            var truncated = r
+            while truncated.utf8.count > 123 { truncated.removeLast() }
+            payload.append(Data(truncated.utf8))
         }
         let frame = makeFrame(opcode: .connectionClose, payload: payload)
         connection.send(content: frame, completion: .contentProcessed { [weak self] _ in
@@ -98,7 +111,11 @@ private class WSConnection: Hashable {
             let payloadLen7 = Int(byte1 & 0x7F)
 
             self.readExtendedLength(payloadLen7: payloadLen7) { payloadLength in
-                self.readMaskAndPayload(masked: masked, length: payloadLength) { maskKey, payload in
+                guard payloadLength <= UInt64(WSConnection.maxPayloadSize) else {
+                    self.fail(code: 1009, reason: "Message too big")
+                    return
+                }
+                self.readMaskAndPayload(masked: masked, length: Int(payloadLength)) { maskKey, payload in
                     let unmasked = masked ? self.unmask(payload: payload, key: maskKey!) : payload
                     self.handleFrame(fin: fin, opcode: opcodeRaw, payload: unmasked)
                 }
@@ -106,13 +123,13 @@ private class WSConnection: Hashable {
         }
     }
 
-    private func readExtendedLength(payloadLen7: Int, completion: @escaping (Int) -> Void) {
+    private func readExtendedLength(payloadLen7: Int, completion: @escaping (UInt64) -> Void) {
         if payloadLen7 < 126 {
-            completion(payloadLen7)
+            completion(UInt64(payloadLen7))
         } else if payloadLen7 == 126 {
             receive(minLength: 2, maxLength: 2) { data in
                 guard let data = data, data.count == 2 else { return }
-                let len = Int(data[0]) << 8 | Int(data[1])
+                let len = UInt64(data[0]) << 8 | UInt64(data[1])
                 completion(len)
             }
         } else {
@@ -120,7 +137,7 @@ private class WSConnection: Hashable {
                 guard let data = data, data.count == 8 else { return }
                 var len: UInt64 = 0
                 for i in 0..<8 { len = (len << 8) | UInt64(data[i]) }
-                completion(Int(len))
+                completion(len)
             }
         }
     }
@@ -176,7 +193,7 @@ private class WSConnection: Hashable {
             connection.send(content: frame, completion: .contentProcessed { [weak self] _ in
                 self?.connection.cancel()
             })
-            delegate?.connection(self, didCloseWithCode: code, reason: reason, wasClean: true)
+            notifyClose(code: code, reason: reason, wasClean: true)
 
         case .ping:
             let pong = makeFrame(opcode: .pong, payload: payload)
@@ -188,6 +205,10 @@ private class WSConnection: Hashable {
 
         case .textFrame, .binaryFrame, .continuationFrame:
             if op == .continuationFrame {
+                guard fragmentBuffer.count + payload.count <= WSConnection.maxPayloadSize else {
+                    fail(code: 1009, reason: "Message too big")
+                    return
+                }
                 fragmentBuffer.append(payload)
                 if fin {
                     let fullPayload = fragmentBuffer
@@ -232,7 +253,20 @@ private class WSConnection: Hashable {
     }
 
     private func handleConnectionEnd() {
-        delegate?.connection(self, didCloseWithCode: 1006, reason: "Connection lost", wasClean: false)
+        notifyClose(code: 1006, reason: "Connection lost", wasClean: false)
+    }
+
+    /// Closes the connection because of a client violation. Called instead of scheduling
+    /// the next receive, so no further frames are read.
+    private func fail(code: Int, reason: String) {
+        close(code: code, reason: reason)
+        notifyClose(code: code, reason: reason, wasClean: false)
+    }
+
+    private func notifyClose(code: Int, reason: String, wasClean: Bool) {
+        guard !didNotifyClose else { return }
+        didNotifyClose = true
+        delegate?.connection(self, didCloseWithCode: code, reason: reason, wasClean: wasClean)
     }
 
     // MARK: - Hashable
@@ -460,15 +494,15 @@ private class WSServer {
         commandDelegate?.run(inBackground: {
             var obj = [String: [String: [String]]]()
             for intf in Interface.allInterfaces() {
-                if !intf.isLoopback {
+                if !intf.isLoopback, let address = intf.address {
                     var intfobj = obj[intf.name] ?? ["ipv4Addresses": [], "ipv6Addresses": []]
                     if intf.family == .ipv6 {
-                        if !intfobj["ipv6Addresses"]!.contains(intf.address!) {
-                            intfobj["ipv6Addresses"]!.append(intf.address!)
+                        if !intfobj["ipv6Addresses"]!.contains(address) {
+                            intfobj["ipv6Addresses"]!.append(address)
                         }
                     } else if intf.family == .ipv4 {
-                        if !intfobj["ipv4Addresses"]!.contains(intf.address!) {
-                            intfobj["ipv4Addresses"]!.append(intf.address!)
+                        if !intfobj["ipv4Addresses"]!.contains(address) {
+                            intfobj["ipv4Addresses"]!.append(address)
                         }
                     }
                     if !(intfobj["ipv4Addresses"]!.isEmpty && intfobj["ipv6Addresses"]!.isEmpty) {
@@ -637,7 +671,9 @@ private class WSServer {
             #endif
             return
         }
-        commandDelegate?.run(inBackground: { wsConn.send(text: msg) })
+        // NWConnection.send is non-blocking and preserves call order; dispatching to a
+        // concurrent background queue could reorder consecutive messages.
+        wsConn.send(text: msg)
     }
 
     @objc public func send_binary(_ command: CDVInvokedUrlCommand) {
@@ -656,7 +692,7 @@ private class WSServer {
             #endif
             return
         }
-        commandDelegate?.run(inBackground: { wsConn.send(binary: data) })
+        wsConn.send(binary: data)
     }
 
     @objc public func close(_ command: CDVInvokedUrlCommand) {
@@ -669,6 +705,12 @@ private class WSServer {
         let code = (command.argument(at: 1, withDefault: -1) as? Int) ?? -1
         let reason = command.argument(at: 2) as? String
 
+        if code != -1 && !WSConnection.isValidCloseCode(code) {
+            let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Invalid close code: \(code)")
+            commandDelegate?.send(r, callbackId: command.callbackId)
+            return
+        }
+
         let wsConn = syncQueue.sync { connections[uuid] }
         guard let wsConn = wsConn else {
             #if DEBUG
@@ -676,13 +718,12 @@ private class WSServer {
             #endif
             return
         }
-        commandDelegate?.run(inBackground: {
-            if code == -1 {
-                wsConn.close()
-            } else {
-                wsConn.close(code: code, reason: reason)
-            }
-        })
+        // Run on the calling thread so a close is ordered after any preceding sends.
+        if code == -1 {
+            wsConn.close()
+        } else {
+            wsConn.close(code: code, reason: reason)
+        }
     }
 
     // MARK: - WSConnectionDelegate
@@ -745,9 +786,9 @@ private class WSServer {
         #if DEBUG
         print("WebSocketServer: WebSocket did close with code: \(code), reason: \(reason), wasClean: \(wasClean)")
         #endif
-        lock.lock()
-        didCloseUUIDs.append(conn.uuid)
-        lock.unlock()
+        syncQueue.sync {
+            didCloseUUIDs.append(conn.uuid)
+        }
 
         let status: [String: Any] = ["action": "onClose", "uuid": conn.uuid, "code": code, "reason": reason, "wasClean": wasClean]
         let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)

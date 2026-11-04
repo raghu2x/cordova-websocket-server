@@ -45,12 +45,13 @@ open class Interface: CustomStringConvertible, CustomDebugStringConvertible {
         var ifaddrsPtr: UnsafeMutablePointer<ifaddrs>?
         if getifaddrs(&ifaddrsPtr) == 0 {
             var ifaddrPtr = ifaddrsPtr
-            while ifaddrPtr != nil {
-                let addr = ifaddrPtr?.pointee.ifa_addr.pointee
-                if addr?.sa_family == UInt8(AF_INET) || addr?.sa_family == UInt8(AF_INET6) {
-                    interfaces.append(Interface(data: (ifaddrPtr?.pointee)!))
+            while let ptr = ifaddrPtr {
+                // ifa_addr may be NULL for some interfaces (e.g. utun, awdl)
+                if let addr = ptr.pointee.ifa_addr,
+                   addr.pointee.sa_family == UInt8(AF_INET) || addr.pointee.sa_family == UInt8(AF_INET6) {
+                    interfaces.append(Interface(data: ptr.pointee))
                 }
-                ifaddrPtr = ifaddrPtr?.pointee.ifa_next
+                ifaddrPtr = ptr.pointee.ifa_next
             }
             freeifaddrs(ifaddrsPtr)
         }
@@ -86,18 +87,18 @@ open class Interface: CustomStringConvertible, CustomDebugStringConvertible {
         let broadcastValid: Bool = ((flags & IFF_BROADCAST) == IFF_BROADCAST)
         self.init(name: String(cString: data.ifa_name),
                   family: Interface.extractFamily(data),
-                  address: Interface.extractAddress(data.ifa_addr.pointee),
-                  netmask: Interface.extractAddress(data.ifa_netmask.pointee),
+                  address: Interface.extractAddress(data.ifa_addr),
+                  netmask: Interface.extractAddress(data.ifa_netmask),
                   running: ((flags & IFF_RUNNING) == IFF_RUNNING),
                   up: ((flags & IFF_UP) == IFF_UP),
                   loopback: ((flags & IFF_LOOPBACK) == IFF_LOOPBACK),
                   multicastSupported: ((flags & IFF_MULTICAST) == IFF_MULTICAST),
-                  broadcastAddress: ((broadcastValid && data.ifa_dstaddr != nil) ? Interface.extractAddress(data.ifa_dstaddr.pointee) : nil))
+                  broadcastAddress: (broadcastValid ? Interface.extractAddress(data.ifa_dstaddr) : nil))
     }
 
     fileprivate static func extractFamily(_ data: ifaddrs) -> Family {
         var family: Family = .other
-        let addr = data.ifa_addr.pointee
+        guard let addr = data.ifa_addr?.pointee else { return family }
         if addr.sa_family == UInt8(AF_INET) {
             family = .ipv4
         } else if addr.sa_family == UInt8(AF_INET6) {
@@ -108,41 +109,18 @@ open class Interface: CustomStringConvertible, CustomDebugStringConvertible {
         return family
     }
 
-    fileprivate static func extractAddress(_ address: sockaddr) -> String? {
-        if address.sa_family == sa_family_t(AF_INET) {
-            return extractAddress_ipv4(address)
-        } else if address.sa_family == sa_family_t(AF_INET6) {
-            return extractAddress_ipv6(address)
-        } else {
-            return nil
-        }
-    }
-
-    fileprivate static func extractAddress_ipv4(_ address: sockaddr) -> String? {
-        var addr = address
-        var hostname = [CChar](repeating: 0, count: Int(2049))
-        if getnameinfo(&addr, socklen_t(addr.sa_len), &hostname,
+    // Works on the original pointer: copying a `sockaddr` by value only keeps 16 bytes,
+    // which truncates a 28-byte `sockaddr_in6`.
+    fileprivate static func extractAddress(_ address: UnsafeMutablePointer<sockaddr>?) -> String? {
+        guard let address = address else { return nil }
+        let family = address.pointee.sa_family
+        guard family == sa_family_t(AF_INET) || family == sa_family_t(AF_INET6) else { return nil }
+        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        if getnameinfo(address, socklen_t(address.pointee.sa_len), &hostname,
                        socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
             return String(cString: hostname)
         }
         return nil
-    }
-
-    fileprivate static func extractAddress_ipv6(_ address: sockaddr) -> String? {
-        var addr = address
-        var ip: [Int8] = [Int8](repeating: Int8(0), count: Int(INET6_ADDRSTRLEN))
-        return inetNtoP(&addr, ip: &ip)
-    }
-
-    fileprivate static func inetNtoP(_ addr: UnsafeMutablePointer<sockaddr>, ip: UnsafeMutablePointer<Int8>) -> String? {
-        let addr6 = withUnsafeMutablePointer(to: &addr.pointee) {
-            $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
-                UnsafeMutableRawPointer(&$0.pointee.sin6_addr)
-            }
-        }
-        let conversion: UnsafePointer<CChar> = inet_ntop(AF_INET6, addr6, ip, socklen_t(INET6_ADDRSTRLEN))
-        let s = String(cString: conversion)
-        return s
     }
 
     /**
