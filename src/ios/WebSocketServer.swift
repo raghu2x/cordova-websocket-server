@@ -787,14 +787,14 @@ private class WSServer {
         sendEvent(["action": "onOpen", "conn": conn], to: callbackId)
     }
 
-    func connection(_ conn: WSConnection, didReceiveText text: String) {
+    fileprivate func connection(_ conn: WSConnection, didReceiveText text: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let registration = self.registration(of: conn) else { return }
             self.sendEvent(["action": "onMessage", "uuid": conn.uuid, "msg": text, "is_binary": false], to: registration.callbackId)
         }
     }
 
-    func connection(_ conn: WSConnection, didReceiveBinary data: Data) {
+    fileprivate func connection(_ conn: WSConnection, didReceiveBinary data: Data) {
         let b64 = data.base64EncodedString()
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let registration = self.registration(of: conn) else { return }
@@ -802,7 +802,7 @@ private class WSServer {
         }
     }
 
-    func connection(_ conn: WSConnection, didCloseWithCode code: Int, reason: String, wasClean: Bool) {
+    fileprivate func connection(_ conn: WSConnection, didCloseWithCode code: Int, reason: String, wasClean: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let registration = self.registration(of: conn) else { return }
             #if DEBUG
