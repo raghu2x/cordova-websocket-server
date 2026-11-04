@@ -1,6 +1,13 @@
 ## [Unreleased]
 
 - **Breaking:** requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`); iOS apps must set `deployment-target` to 15.0 or later (see README)
+- Stop the server on page reload/navigation (`onReset`), so a new page can call `start()` again (both platforms)
+- [iOS] `stop()` now closes connected clients with code 1001 and reports `onClose` for each before the stop callback, as on Android
+- [iOS] Server-initiated `close()` performs the closing handshake: `onClose` reports the client's code with `wasClean: true` (1006 only if the client doesn't answer within 5 s); no data is sent after a close
+- [iOS] `resource` is the full request target (e.g. `/?param1=value1`) instead of only the query string, matching Android and the README
+- [Android] `close(conn, code)` without a reason no longer sends the reason `"null"`
+- [Android] `onOpen` now includes `acceptedProtocol`, as documented
+- [Android] Enable address reuse so the server can restart on the same port immediately
 - [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
 - [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
 - [Android] Replace deprecated `initialize()` override with `pluginInitialize()`

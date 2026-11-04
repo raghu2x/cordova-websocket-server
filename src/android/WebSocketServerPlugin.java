@@ -43,6 +43,23 @@ public class WebSocketServerPlugin extends CordovaPlugin {
     }
 
     @Override
+    public void onReset() {
+        // Page reload or navigation: the JS that started the server is gone, and a new
+        // page calling start() would otherwise get "Server already running."
+        final WebSocketServerImpl oldServer = wsserver;
+        wsserver = null;
+        if (oldServer != null) {
+            cordova.getThreadPool().execute(() -> {
+                try {
+                    oldServer.stop(2000);
+                } catch (InterruptedException e) {
+                    Log.e(TAG, e.getMessage(), e);
+                }
+            });
+        }
+    }
+
+    @Override
     public void onDestroy() {
         super.onDestroy();
         if (wsserver != null) {
@@ -145,6 +162,9 @@ public class WebSocketServerPlugin extends CordovaPlugin {
                     newServer.setTcpNoDelay(tcpNoDelay);
                 }
 
+                // allow an immediate restart on the same port (socket may still be in TIME_WAIT)
+                newServer.setReuseAddr(true);
+
                 try {
                     newServer.start();
                 } catch (IllegalStateException e) {
@@ -190,9 +210,10 @@ public class WebSocketServerPlugin extends CordovaPlugin {
 
         } else if (ACTION_SEND.equals(action) || ACTION_SEND_BINARY.equals(action)) {
 
-            final String uuid = args.optString(0);
-            final String msg = args.optString(1);
-            if (uuid != null && msg != null) {
+            // optString() turns a JSON null into the string "null", so check isNull() first
+            if (!args.isNull(0) && !args.isNull(1)) {
+                final String uuid = args.optString(0);
+                final String msg = args.optString(1);
                 // WebSocket.send() only queues the frame, so call it directly: dispatching to
                 // the (multi-threaded) Cordova pool could reorder consecutive messages.
                 WebSocketServerImpl server = wsserver;
@@ -206,11 +227,12 @@ public class WebSocketServerPlugin extends CordovaPlugin {
 
         } else if (ACTION_CLOSE.equals(action)) {
 
-            final String uuid = args.optString(0);
             final int code = args.optInt(1, -1);
-            final String reason = args.optString(2);
+            // close(conn, code) without a reason arrives as null, which optString() would send as "null"
+            final String reason = args.isNull(2) ? "" : args.optString(2);
 
-            if (uuid != null) {
+            if (!args.isNull(0)) {
+                final String uuid = args.optString(0);
                 // Same thread as send() so a close is ordered after any preceding sends.
                 WebSocketServerImpl server = wsserver;
                 if (server != null) {

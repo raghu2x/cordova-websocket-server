@@ -20,14 +20,24 @@ private class WSConnection: Hashable {
     let connection: NWConnection
     let remoteHost: String
     let urlRequest: URLRequest
+    /// Raw request target from the handshake, e.g. "/chat?token=abc".
+    let resource: String
 
     private var fragmentBuffer: Data = Data()
     private var fragmentOpcode: WSOpcode = .textFrame
     private var isFragmenting: Bool = false
     private var didNotifyClose: Bool = false
 
+    // Set once a close frame has been sent. Read and written from the plugin (main) thread
+    // and the connection queue, hence the lock.
+    private let closeLock = NSLock()
+    private var closeSent: Bool = false
+
     /// Largest message (single frame or reassembled fragments) accepted from a client.
     static let maxPayloadSize = 16 * 1024 * 1024
+
+    /// How long to wait for the client to answer our close frame before dropping the connection.
+    static let closeTimeout: TimeInterval = 5
 
     /// Close codes an endpoint may send (RFC 6455 §7.4 + IANA registry).
     static func isValidCloseCode(_ code: Int) -> Bool {
@@ -36,11 +46,12 @@ private class WSConnection: Hashable {
 
     weak var delegate: WSConnectionDelegate?
 
-    init(uuid: String, connection: NWConnection, remoteHost: String, urlRequest: URLRequest) {
+    init(uuid: String, connection: NWConnection, remoteHost: String, urlRequest: URLRequest, resource: String) {
         self.uuid = uuid
         self.connection = connection
         self.remoteHost = remoteHost
         self.urlRequest = urlRequest
+        self.resource = resource
     }
 
     func startReceiving() {
@@ -48,17 +59,61 @@ private class WSConnection: Hashable {
     }
 
     func send(text: String) {
-        guard let data = text.data(using: .utf8) else { return }
+        // No data frames may follow a close frame (RFC 6455 §5.5.1)
+        guard !isCloseSent, let data = text.data(using: .utf8) else { return }
         let frame = makeFrame(opcode: .textFrame, payload: data)
         connection.send(content: frame, completion: .idempotent)
     }
 
     func send(binary: Data) {
+        guard !isCloseSent else { return }
         let frame = makeFrame(opcode: .binaryFrame, payload: binary)
         connection.send(content: frame, completion: .idempotent)
     }
 
+    /// Starts the closing handshake: sends a close frame and keeps reading until the client
+    /// answers with its own close frame (see `handleFrame`), which reports `onClose` with
+    /// `wasClean: true`. If the client doesn't answer within `closeTimeout`, the connection is
+    /// dropped and reported as 1006.
     func close(code: Int = 1000, reason: String? = nil) {
+        guard markCloseSent() else { return }
+        connection.send(content: makeCloseFrame(code: code, reason: reason), completion: .idempotent)
+        let connection = self.connection
+        DispatchQueue.global().asyncAfter(deadline: .now() + WSConnection.closeTimeout) {
+            connection.cancel()
+        }
+    }
+
+    /// Sends a close frame, drops the connection without waiting for the client's answer and
+    /// reports `onClose` right away. Used for protocol violations and when the server stops.
+    /// Must be called on the connection's queue.
+    func terminate(code: Int, reason: String) {
+        if markCloseSent() {
+            connection.send(content: makeCloseFrame(code: code, reason: reason), completion: .contentProcessed { [connection = self.connection] _ in
+                connection.cancel()
+            })
+        } else {
+            connection.cancel()
+        }
+        notifyClose(code: code, reason: reason, wasClean: false)
+    }
+
+    private var isCloseSent: Bool {
+        closeLock.lock()
+        defer { closeLock.unlock() }
+        return closeSent
+    }
+
+    /// Returns false if a close frame was already sent.
+    private func markCloseSent() -> Bool {
+        closeLock.lock()
+        defer { closeLock.unlock() }
+        if closeSent { return false }
+        closeSent = true
+        return true
+    }
+
+    private func makeCloseFrame(code: Int, reason: String?) -> Data {
         var payload = Data()
         var c = UInt16(WSConnection.isValidCloseCode(code) ? code : 1000).bigEndian
         payload.append(contentsOf: withUnsafeBytes(of: &c) { Array($0) })
@@ -69,10 +124,7 @@ private class WSConnection: Hashable {
             while truncated.utf8.count > 123 { truncated.removeLast() }
             payload.append(Data(truncated.utf8))
         }
-        let frame = makeFrame(opcode: .connectionClose, payload: payload)
-        connection.send(content: frame, completion: .contentProcessed { [weak self] _ in
-            self?.connection.cancel()
-        })
+        return makeFrame(opcode: .connectionClose, payload: payload)
     }
 
     // MARK: - Frame Building
@@ -112,7 +164,7 @@ private class WSConnection: Hashable {
 
             self.readExtendedLength(payloadLen7: payloadLen7) { payloadLength in
                 guard payloadLength <= UInt64(WSConnection.maxPayloadSize) else {
-                    self.fail(code: 1009, reason: "Message too big")
+                    self.terminate(code: 1009, reason: "Message too big")
                     return
                 }
                 self.readMaskAndPayload(masked: masked, length: Int(payloadLength)) { maskKey, payload in
@@ -191,11 +243,16 @@ private class WSConnection: Hashable {
                 code = 1000
                 reason = ""
             }
-            // Echo close frame
-            let frame = makeFrame(opcode: .connectionClose, payload: payload)
-            connection.send(content: frame, completion: .contentProcessed { [weak self] _ in
-                self?.connection.cancel()
-            })
+            if markCloseSent() {
+                // Client started the closing handshake: echo its close frame, then drop the connection
+                let frame = makeFrame(opcode: .connectionClose, payload: payload)
+                connection.send(content: frame, completion: .contentProcessed { [connection = self.connection] _ in
+                    connection.cancel()
+                })
+            } else {
+                // Client answered the close frame we sent: handshake complete
+                connection.cancel()
+            }
             notifyClose(code: code, reason: reason, wasClean: true)
 
         case .ping:
@@ -209,7 +266,7 @@ private class WSConnection: Hashable {
         case .textFrame, .binaryFrame, .continuationFrame:
             if op == .continuationFrame {
                 guard fragmentBuffer.count + payload.count <= WSConnection.maxPayloadSize else {
-                    fail(code: 1009, reason: "Message too big")
+                    terminate(code: 1009, reason: "Message too big")
                     return
                 }
                 fragmentBuffer.append(payload)
@@ -259,13 +316,6 @@ private class WSConnection: Hashable {
         notifyClose(code: 1006, reason: "Connection lost", wasClean: false)
     }
 
-    /// Closes the connection because of a client violation. Called instead of scheduling
-    /// the next receive, so no further frames are read.
-    private func fail(code: Int, reason: String) {
-        close(code: code, reason: reason)
-        notifyClose(code: code, reason: reason, wasClean: false)
-    }
-
     private func notifyClose(code: Int, reason: String, wasClean: Bool) {
         guard !didNotifyClose else { return }
         didNotifyClose = true
@@ -289,7 +339,8 @@ private class WSServer {
     private var listener: NWListener?
     private let port: UInt16
     private let tcpNoDelay: Bool
-    private let queue = DispatchQueue(label: "com.cordova.wsserver", qos: .userInitiated)
+    /// Listener and all connections run on this queue.
+    let queue = DispatchQueue(label: "com.cordova.wsserver", qos: .userInitiated)
 
     var onDidStart: ((UInt16) -> Void)?
     var onDidStop: ((Error?) -> Void)?
@@ -349,11 +400,12 @@ private class WSServer {
     private func handleNewConnection(_ conn: NWConnection) {
         conn.start(queue: queue)
         // Read the HTTP upgrade request
-        readHTTPRequest(conn: conn) { [weak self] request in
-            guard let self = self, let request = request else {
+        readHTTPRequest(conn: conn) { [weak self] parsed in
+            guard let self = self, let parsed = parsed else {
                 conn.cancel()
                 return
             }
+            let (request, resource) = parsed
             // Validate and decide
             let result = self.onShouldAccept?(request) ?? (accepted: true, responseHeaders: [:])
             if !result.accepted {
@@ -374,7 +426,7 @@ private class WSServer {
                 guard let self = self else { return }
                 let remote = self.remoteHost(conn: conn)
                 let uuid = UUID().uuidString
-                let wsConn = WSConnection(uuid: uuid, connection: conn, remoteHost: remote, urlRequest: request)
+                let wsConn = WSConnection(uuid: uuid, connection: conn, remoteHost: remote, urlRequest: request, resource: resource)
                 self.onWebSocketDidOpen?(wsConn)
                 wsConn.startReceiving()
             }
@@ -383,7 +435,7 @@ private class WSServer {
 
     // MARK: - HTTP Handshake Helpers
 
-    private func readHTTPRequest(conn: NWConnection, completion: @escaping (URLRequest?) -> Void) {
+    private func readHTTPRequest(conn: NWConnection, completion: @escaping ((URLRequest, String)?) -> Void) {
         var accumulated = Data()
         func readMore() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { content, _, isComplete, error in
@@ -401,7 +453,8 @@ private class WSServer {
         readMore()
     }
 
-    private func parseHTTPRequest(_ data: Data) -> URLRequest? {
+    /// Returns the request and its raw request target (path + query, as sent by the client).
+    private func parseHTTPRequest(_ data: Data) -> (URLRequest, String)? {
         guard let raw = String(data: data, encoding: .utf8) else { return nil }
         let lines = raw.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else { return nil }
@@ -426,7 +479,7 @@ private class WSServer {
                 request.setValue(value, forHTTPHeaderField: name)
             }
         }
-        return request
+        return (request, path)
     }
 
     private func makeAcceptKey(_ clientKey: String) -> String {
@@ -478,6 +531,21 @@ private class WSServer {
     override public func pluginInitialize() {
         connections = [:]
         didCloseUUIDs = []
+    }
+
+    override public func onReset() {
+        // Page reload or navigation: the JS that started the server is gone, and a new page
+        // calling start() would otherwise get "Server already running".
+        guard let server = wsserver else { return }
+        wsserver = nil
+        didStopOrDidFail = false
+        let conns = syncQueue.sync { () -> [WSConnection] in
+            let all = Array(connections.values)
+            connections.removeAll()
+            didCloseUUIDs.removeAll()
+            return all
+        }
+        shutdown(server, connections: conns, detach: true)
     }
 
     override public func onAppTerminate() {
@@ -642,16 +710,15 @@ private class WSServer {
             didStopOrDidFail = false
         }
 
-        guard wsserver != nil else {
+        guard let server = wsserver else {
             let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Server is not running")
             commandDelegate?.send(r, callbackId: command.callbackId)
             return
         }
 
         stopCallbackId = command.callbackId
-        commandDelegate?.run(inBackground: { [weak self] in
-            self?.wsserver?.stop()
-        })
+        let conns = syncQueue.sync { Array(connections.values) }
+        shutdown(server, connections: conns, detach: false)
 
         let result = CDVPluginResult(status: CDVCommandStatus_NO_RESULT)
         result?.setKeepCallbackAs(true)
@@ -747,14 +814,13 @@ private class WSServer {
         let request = wsConn.urlRequest
         let acceptedProtocol = protocols != nil ? (getAcceptedProtocol(request) ?? "") : ""
         let httpFields = request.allHTTPHeaderFields ?? [:]
-        let resource = request.url?.query ?? ""
 
         let conn: [String: Any] = [
             "uuid": wsConn.uuid,
             "remoteAddr": wsConn.remoteHost,
             "acceptedProtocol": acceptedProtocol,
             "httpFields": httpFields,
-            "resource": resource
+            "resource": wsConn.resource
         ]
         let status: [String: Any] = ["action": "onOpen", "conn": conn]
         let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
@@ -798,6 +864,27 @@ private class WSServer {
     }
 
     // MARK: - Helpers
+
+    /// Closes every client with 1001 and stops the listener. Runs on the server's queue, so each
+    /// client's onClose is sent before the listener reports it stopped (matching Android).
+    /// With `detach`, the old server and its connections are cut off from the plugin first, so
+    /// none of their late events reach JS or the plugin's state (used after a page reset).
+    private func shutdown(_ server: WSServer, connections conns: [WSConnection], detach: Bool) {
+        server.queue.async {
+            if detach {
+                server.onDidStart = nil
+                server.onDidStop = nil
+                server.onDidFail = nil
+                server.onWebSocketDidOpen = nil
+                server.onShouldAccept = { _ in (false, [:]) }
+            }
+            for conn in conns {
+                if detach { conn.delegate = nil }
+                conn.terminate(code: 1001, reason: "Server stopping")
+            }
+            server.stop()
+        }
+    }
 
     private func getAcceptedProtocol(_ request: URLRequest) -> String? {
         guard let secProto = request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol") else { return nil }
