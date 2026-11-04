@@ -11,6 +11,7 @@ import org.java_websocket.exceptions.InvalidDataException;
 import org.java_websocket.framing.CloseFrame;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.handshake.ServerHandshakeBuilder;
+import org.java_websocket.protocols.IProtocol;
 import org.java_websocket.server.WebSocketServer;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -106,6 +107,8 @@ public class WebSocketServerImpl extends WebSocketServer {
             conn.put("remoteAddr", addr == null ? null : addr.getHostAddress());
             conn.put("httpFields", httpFields);
             conn.put("resource", clientHandshake.getResourceDescriptor());
+            IProtocol protocol = webSocket.getProtocol();
+            conn.put("acceptedProtocol", protocol == null ? "" : protocol.getProvidedProtocol());
 
             JSONObject status = new JSONObject();
             status.put("action", "onOpen");
