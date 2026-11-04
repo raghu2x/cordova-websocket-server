@@ -112,7 +112,8 @@ public class WebSocketServerImpl extends WebSocketServer {
             status.put("action", "onOpen");
             status.put("conn", conn);
 
-            Log.d(WebSocketServerPlugin.TAG, "onopen result: " + status.toString());
+            // httpFields may carry cookies or auth headers, so only the uuid is logged
+            Log.d(WebSocketServerPlugin.TAG, "onopen: " + uuid);
             PluginResult result = new PluginResult(PluginResult.Status.OK, status);
             result.setKeepCallback(true);
             callbackContext.sendPluginResult(result);
@@ -136,7 +137,7 @@ public class WebSocketServerImpl extends WebSocketServer {
                 status.put("uuid", uuid);
                 status.put("msg", msg);
 
-                Log.d(WebSocketServerPlugin.TAG, "onmessage result: " + status.toString());
+                Log.d(WebSocketServerPlugin.TAG, "onmessage: " + uuid + " (" + msg.length() + " chars)");
                 PluginResult result = new PluginResult(PluginResult.Status.OK, status);
                 result.setKeepCallback(true);
                 callbackContext.sendPluginResult(result);
@@ -166,10 +167,11 @@ public class WebSocketServerImpl extends WebSocketServer {
                 JSONObject status = new JSONObject();
                 status.put("action", "onMessage");
                 status.put("uuid", uuid);
-                status.put("msg", Base64.encodeToString(bin, Base64.DEFAULT));
+                // NO_WRAP: DEFAULT inserts a newline every 76 chars
+                status.put("msg", Base64.encodeToString(bin, Base64.NO_WRAP));
                 status.put("is_binary", true);
 
-                Log.d(WebSocketServerPlugin.TAG, "onmessage (binary) result: " + status.toString());
+                Log.d(WebSocketServerPlugin.TAG, "onmessage (binary): " + uuid + " (" + bin.length + " bytes)");
                 PluginResult result = new PluginResult(PluginResult.Status.OK, status);
                 result.setKeepCallback(true);
                 callbackContext.sendPluginResult(result);

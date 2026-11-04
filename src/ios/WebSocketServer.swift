@@ -164,9 +164,12 @@ private class WSConnection: Hashable {
     }
 
     private func unmask(payload: Data, key: [UInt8]) -> Data {
-        var result = Data(count: payload.count)
-        for i in 0..<payload.count {
-            result[i] = payload[i] ^ key[i % 4]
+        // XOR in place over raw bytes; per-index Data subscripting is slow for large payloads.
+        var result = payload
+        result.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            for i in 0..<bytes.count {
+                bytes[i] ^= key[i & 3]
+            }
         }
         return result
     }

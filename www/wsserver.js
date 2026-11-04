@@ -5,7 +5,8 @@ var fail = function (o) {
   console.error('Error ' + JSON.stringify(o));
 };
 
-var connections = [];
+// keyed by connection uuid
+var connections = {};
 
 var WebSocketServer = {
   getInterfaces: function (success, failure) {
@@ -13,11 +14,12 @@ var WebSocketServer = {
   },
 
   start: function (port, options, success, failure) {
+    options = options || {};
     return exec(
       function (result) {
         switch (result.action) {
           case 'onFailure':
-            connections = [];
+            connections = {};
             var callback = options[result.action];
             if (callback) {
               callback(result.addr, result.port, result.reason);
@@ -64,7 +66,7 @@ var WebSocketServer = {
             }
             break;
           default:
-            connections = [];
+            connections = {};
             if (success) {
               success(result.addr, result.port);
             }
@@ -80,7 +82,7 @@ var WebSocketServer = {
   stop: function (success, failure) {
     return exec(
       function (result) {
-        connections = [];
+        connections = {};
         if (success) {
           success(result.addr, result.port);
         }
@@ -97,14 +99,17 @@ var WebSocketServer = {
       // send text frame (websocket opcode 1)
       return exec(null, fail, 'WebSocketServer', 'send', [conn.uuid, msg]);
     } else {
-      // convert any iterable object to Base64 string
-      var binary_string = '';
-      var bytes = new Uint8Array(msg);
-      var len = bytes.byteLength;
-      for (var i = 0; i < len; i++) {
-        binary_string += String.fromCharCode(bytes[i]);
+      // convert ArrayBuffer, typed array / DataView or any iterable of bytes to Base64 string
+      var bytes = ArrayBuffer.isView(msg)
+        ? new Uint8Array(msg.buffer, msg.byteOffset, msg.byteLength)
+        : new Uint8Array(msg);
+      var chunks = [];
+      // build the binary string in chunks: per-byte concatenation is slow for large buffers,
+      // and a single fromCharCode.apply call can exceed the engine's argument limit
+      for (var i = 0; i < bytes.length; i += 0x8000) {
+        chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)));
       }
-      var msg_base64 = window.btoa(binary_string);
+      var msg_base64 = window.btoa(chunks.join(''));
 
       // send binary frame (websocket opcode 2)
       return exec(null, fail, 'WebSocketServer', 'send_binary', [conn.uuid, msg_base64]);
