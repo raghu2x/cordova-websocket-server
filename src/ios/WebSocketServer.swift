@@ -592,9 +592,7 @@ private class WSServer {
             #if DEBUG
             print("WebSocketServer: getInterfaces: \(obj)")
             #endif
-            let pluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: obj)
-            pluginResult?.setKeepCallbackAs(false)
-            self.commandDelegate?.send(pluginResult, callbackId: command.callbackId)
+            self.sendEvent(obj, to: command.callbackId, keepCallback: false)
         })
     }
 
@@ -856,14 +854,17 @@ private class WSServer {
         }
     }
 
+    // The explicit `CDVPluginResult` type compiles on every cordova-ios version: the initializer
+    // returns an implicitly unwrapped optional on 6/7 but a non-optional value on 8+, so neither
+    // `result?.` nor `result.` alone works on both.
     private func sendEvent(_ status: [String: Any], to callbackId: String, keepCallback: Bool = true) {
-        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-        result?.setKeepCallbackAs(keepCallback)
+        let result: CDVPluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
+        result.setKeepCallbackAs(keepCallback)
         commandDelegate?.send(result, callbackId: callbackId)
     }
 
     private func sendError(_ message: String, to callbackId: String) {
-        let result = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: message)
+        let result: CDVPluginResult = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: message)
         commandDelegate?.send(result, callbackId: callbackId)
     }
 
