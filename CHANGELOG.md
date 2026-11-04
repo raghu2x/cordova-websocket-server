@@ -18,6 +18,7 @@
 - [iOS] Closed connections are removed right away instead of when the next client connects
 - [iOS] Subprotocol negotiation accepts `a,b` and extra spaces, and repeated `Sec-WebSocket-Protocol` headers
 - [iOS] A connection no longer stops reading after an empty or short read from the network
+- [iOS] Fix build on `cordova-ios` 6/7 (`unable to resolve module dependency: 'Cordova'`): `Cordova` is only imported where it is a module; older versions expose it through the app's bridging header
 - [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
 - [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
 - [Android] Replace deprecated `initialize()` override with `pluginInitialize()`
