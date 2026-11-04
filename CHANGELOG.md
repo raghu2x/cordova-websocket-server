@@ -12,6 +12,12 @@
 - [Android] `onDestroy` no longer stops the server on the UI thread (possible ANR)
 - [Android] `getInterfaces` returns an empty result instead of crashing on devices without network interfaces
 - [Android] Error results are no longer followed by a second `INVALID_ACTION` result
+- [iOS] Fix data races: plugin state is now only touched on the main thread, and the server's listener only on its own queue (a `stop()` right after `start()` could leave the port bound)
+- [iOS] A server that fails to start no longer sends a result to an earlier `stop()` call's callback; each server's events go only to the callback of the `start()` that created it
+- [iOS] `stop()` frees the plugin immediately for a new `start()`, as on Android, and its result reports the actual port when started on port 0
+- [iOS] Closed connections are removed right away instead of when the next client connects
+- [iOS] Subprotocol negotiation accepts `a,b` and extra spaces, and repeated `Sec-WebSocket-Protocol` headers
+- [iOS] A connection no longer stops reading after an empty or short read from the network
 - [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
 - [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
 - [Android] Replace deprecated `initialize()` override with `pluginInitialize()`

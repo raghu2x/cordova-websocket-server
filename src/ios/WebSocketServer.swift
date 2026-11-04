@@ -299,15 +299,22 @@ private class WSConnection: Hashable {
         }
     }
 
-    private func receive(minLength: Int, maxLength: Int, completion: @escaping (Data?) -> Void) {
-        connection.receive(minimumIncompleteLength: minLength, maximumLength: maxLength) { [weak self] content, _, isComplete, error in
-            if let content = content, !content.isEmpty {
-                completion(content)
+    /// Reads exactly `minLength`...`maxLength` bytes. Short or empty deliveries on an open
+    /// connection are accumulated and the read is re-issued, instead of silently stopping.
+    private func receive(minLength: Int, maxLength: Int, accumulated: Data = Data(), completion: @escaping (Data?) -> Void) {
+        connection.receive(minimumIncompleteLength: minLength - accumulated.count,
+                           maximumLength: maxLength - accumulated.count) { [weak self] content, _, isComplete, error in
+            guard let self = self else { return }
+            var data = accumulated
+            if let content = content { data.append(content) }
+            if data.count >= minLength {
+                completion(data)
             } else if isComplete || error != nil {
-                self?.handleConnectionEnd()
+                // Stream ended, possibly in the middle of a frame
+                self.handleConnectionEnd()
                 completion(nil)
             } else {
-                completion(nil)
+                self.receive(minLength: minLength, maxLength: maxLength, accumulated: data, completion: completion)
             }
         }
     }
@@ -337,7 +344,8 @@ private protocol WSConnectionDelegate: AnyObject {
 private class WSServer {
 
     private var listener: NWListener?
-    private let port: UInt16
+    /// Port requested in start(); 0 means "any".
+    let port: UInt16
     private let tcpNoDelay: Bool
     /// Listener and all connections run on this queue.
     let queue = DispatchQueue(label: "com.cordova.wsserver", qos: .userInitiated)
@@ -378,9 +386,14 @@ private class WSServer {
         }
     }
 
+    /// Cancels the listener; `onDidStop` fires once it is cancelled. Like `start()`, call on `queue`.
     func stop() {
-        listener?.cancel()
-        listener = nil
+        guard let listener = listener else {
+            // Never created (NWListener init failed): nothing to wait for
+            onDidStop?(nil)
+            return
+        }
+        listener.cancel()
     }
 
     private func handleListenerState(_ state: NWListener.State) {
@@ -391,6 +404,7 @@ private class WSServer {
         case .failed(let error):
             onDidFail?(error)
         case .cancelled:
+            listener = nil
             onDidStop?(nil)
         default:
             break
@@ -476,7 +490,8 @@ private class WSServer {
             if let colonIdx = line.firstIndex(of: ":") {
                 let name = String(line[line.startIndex..<colonIdx]).trimmingCharacters(in: .whitespaces)
                 let value = String(line[line.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
-                request.setValue(value, forHTTPHeaderField: name)
+                // addValue folds repeated headers into one comma-separated value (RFC 7230 §3.2.2)
+                request.addValue(value, forHTTPHeaderField: name)
             }
         }
         return (request, path)
@@ -517,44 +532,35 @@ private class WSServer {
 
 @objc(WebSocketServer) public class WebSocketServer: CDVPlugin, WSConnectionDelegate {
 
-    private var wsserver: WSServer?
-    private var port: Int = 0
-    private var origins: [String]?
-    private var protocols: [String]?
-    private var connections: [String: WSConnection] = [:]
-    private var didCloseUUIDs: [String] = []
-    private var startCallbackId: String?
-    private var stopCallbackId: String?
-    private var didStopOrDidFail: Bool = false
-    private let syncQueue = DispatchQueue(label: "com.cordova.wsserver.sync")
-
-    override public func pluginInitialize() {
-        connections = [:]
-        didCloseUUIDs = []
+    /// A connection known to JS, and the start() callback its events are sent to.
+    private struct Registration {
+        let conn: WSConnection
+        let callbackId: String
     }
+
+    // All plugin state is confined to the main thread: Cordova runs commands there, and every
+    // server/connection callback (which arrive on the server's queue) hops to it before
+    // touching state or sending results.
+    private var wsserver: WSServer?
+    private var connections: [String: Registration] = [:]
 
     override public func onReset() {
         // Page reload or navigation: the JS that started the server is gone, and a new page
         // calling start() would otherwise get "Server already running".
+        // Dropping the registrations also drops any late events of a server still stopping.
+        let conns = connections.values.map { $0.conn }
+        connections.removeAll()
         guard let server = wsserver else { return }
         wsserver = nil
-        didStopOrDidFail = false
-        let conns = syncQueue.sync { () -> [WSConnection] in
-            let all = Array(connections.values)
-            connections.removeAll()
-            didCloseUUIDs.removeAll()
-            return all
-        }
         shutdown(server, connections: conns, detach: true)
     }
 
     override public func onAppTerminate() {
-        wsserver?.stop()
-        wsserver = nil
-        syncQueue.sync {
-            connections.removeAll()
-            didCloseUUIDs.removeAll()
+        if let server = wsserver {
+            server.queue.sync { server.stop() }
         }
+        wsserver = nil
+        connections.removeAll()
     }
 
     // MARK: - Cordova Commands
@@ -593,111 +599,77 @@ private class WSServer {
         print("WebSocketServer: start")
         #endif
 
-        if didStopOrDidFail {
-            wsserver = nil
-            didStopOrDidFail = false
-        }
-
-        if wsserver != nil {
-            let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Server already running")
-            commandDelegate?.send(r, callbackId: command.callbackId)
+        guard wsserver == nil else {
+            sendError("Server already running", to: command.callbackId)
             return
         }
 
         guard let p = command.argument(at: 0) as? Int, p >= 0, p <= 65535 else {
-            let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Port number error")
-            commandDelegate?.send(r, callbackId: command.callbackId)
+            sendError("Port number error", to: command.callbackId)
             return
         }
-        port = p
-        origins = command.argument(at: 1) as? [String]
-        protocols = command.argument(at: 2) as? [String]
+        let origins = command.argument(at: 1) as? [String]
+        let protocols = command.argument(at: 2) as? [String]
         let tcpNoDelay = (command.argument(at: 3) as? Bool) ?? false
+        // Every event of this server goes to the callback of the start() that created it
+        let callbackId: String = command.callbackId
 
-        startCallbackId = command.callbackId
-
-        let server = WSServer(port: UInt16(port), tcpNoDelay: tcpNoDelay)
+        let server = WSServer(port: UInt16(p), tcpNoDelay: tcpNoDelay)
         wsserver = server
 
-        server.onDidStart = { [weak self] realPort in
-            guard let self = self else { return }
-            #if DEBUG
-            print("WebSocketServer: Server did start on port \(realPort)")
-            #endif
-            let status: [String: Any] = ["addr": "0.0.0.0", "port": Int(realPort)]
-            let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-            result?.setKeepCallbackAs(true)
-            self.commandDelegate?.send(result, callbackId: self.startCallbackId)
-        }
-
-        server.onDidStop = { [weak self] _ in
-            guard let self = self else { return }
-            #if DEBUG
-            print("WebSocketServer: Server did stop")
-            #endif
-            self.didStopOrDidFail = true
-            self.syncQueue.sync {
-                self.connections.removeAll()
-                self.didCloseUUIDs.removeAll()
+        server.onDidStart = { [weak self, weak server] realPort in
+            DispatchQueue.main.async {
+                guard let self = self, let server = server, self.wsserver === server else { return }
+                #if DEBUG
+                print("WebSocketServer: Server did start on port \(realPort)")
+                #endif
+                self.sendEvent(["addr": "0.0.0.0", "port": Int(realPort)], to: callbackId)
             }
-            let status: [String: Any] = ["addr": "0.0.0.0", "port": self.port]
-            let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-            result?.setKeepCallbackAs(false)
-            self.commandDelegate?.send(result, callbackId: self.stopCallbackId)
         }
 
-        server.onDidFail = { [weak self] error in
-            guard let self = self else { return }
-            #if DEBUG
-            print("WebSocketServer: Server did fail: \(error)")
-            #endif
-            self.wsserver?.stop()
-            self.didStopOrDidFail = true
-            self.syncQueue.sync {
-                self.connections.removeAll()
-                self.didCloseUUIDs.removeAll()
+        server.onDidFail = { [weak self, weak server] error in
+            DispatchQueue.main.async {
+                // Ignore failures of a server that was already stopped or replaced
+                guard let self = self, let server = server, self.wsserver === server else { return }
+                #if DEBUG
+                print("WebSocketServer: Server did fail: \(error)")
+                #endif
+                self.wsserver = nil
+                let conns = self.removeConnections(of: callbackId)
+                // Close its clients and stop the listener silently: the onFailure result below
+                // is the final result of the start() callback, as on Android.
+                self.shutdown(server, connections: conns, detach: true)
+                let status: [String: Any] = ["action": "onFailure", "addr": "0.0.0.0", "port": Int(server.port), "reason": error.localizedDescription]
+                self.sendEvent(status, to: callbackId, keepCallback: false)
             }
-            let status: [String: Any] = ["action": "onFailure", "addr": "0.0.0.0", "port": self.port, "reason": error.localizedDescription]
-            let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-            result?.setKeepCallbackAs(false)
-            self.commandDelegate?.send(result, callbackId: self.startCallbackId)
         }
 
-        server.onShouldAccept = { [weak self] request in
-            guard let self = self else { return (false, [:]) }
-            if let o = self.origins {
-                guard let origin = request.value(forHTTPHeaderField: "Origin"), o.contains(origin) else {
-                    #if DEBUG
-                    print("WebSocketServer: Origin denied")
-                    #endif
-                    return (false, [:])
+        // Called on the server's queue; only uses values captured here
+        server.onShouldAccept = { request in
+            WebSocketServer.shouldAccept(request, origins: origins, protocols: protocols)
+        }
+
+        server.onWebSocketDidOpen = { [weak self, weak server] wsConn in
+            // Set before the connection starts reading, so no message is missed
+            wsConn.delegate = self
+            DispatchQueue.main.async {
+                guard let self = self, let server = server, self.wsserver === server else {
+                    // The server was stopped while this client was completing its handshake
+                    (wsConn.connection.queue ?? DispatchQueue.global()).async {
+                        wsConn.delegate = nil
+                        wsConn.terminate(code: 1001, reason: "Server stopping")
+                    }
+                    return
                 }
+                self.handleWebSocketDidOpen(wsConn, protocols: protocols, callbackId: callbackId)
             }
-            var extraHeaders: [String: String] = [:]
-            if let _ = self.protocols {
-                if let accepted = self.getAcceptedProtocol(request) {
-                    extraHeaders["Sec-WebSocket-Protocol"] = accepted
-                } else {
-                    #if DEBUG
-                    print("WebSocketServer: Sec-WebSocket-Protocol denied")
-                    #endif
-                    return (false, [:])
-                }
-            }
-            return (true, extraHeaders)
         }
 
-        server.onWebSocketDidOpen = { [weak self] wsConn in
-            guard let self = self else { return }
-            self.handleWebSocketDidOpen(wsConn)
-        }
-
-        commandDelegate?.run(inBackground: {
+        // On the server's queue, like everything else in WSServer, so a stop() issued right
+        // after start() can't run before the listener exists. start() doesn't block.
+        server.queue.async {
             server.start()
-        })
-
-        let result = CDVPluginResult(status: CDVCommandStatus_NO_RESULT)
-        result?.setKeepCallbackAs(true)
+        }
     }
 
     @objc public func stop(_ command: CDVInvokedUrlCommand) {
@@ -705,23 +677,23 @@ private class WSServer {
         print("WebSocketServer: stop")
         #endif
 
-        if didStopOrDidFail {
-            wsserver = nil
-            didStopOrDidFail = false
-        }
-
         guard let server = wsserver else {
-            let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Server is not running")
-            commandDelegate?.send(r, callbackId: command.callbackId)
+            sendError("Server is not running", to: command.callbackId)
             return
         }
 
-        stopCallbackId = command.callbackId
-        let conns = syncQueue.sync { Array(connections.values) }
-        shutdown(server, connections: conns, detach: false)
-
-        let result = CDVPluginResult(status: CDVCommandStatus_NO_RESULT)
-        result?.setKeepCallbackAs(true)
+        // As on Android, the plugin is free for a new start() right away
+        wsserver = nil
+        let stopCallbackId: String = command.callbackId
+        let conns = connections.values.map { $0.conn }
+        shutdown(server, connections: conns, detach: false) { [weak self] port in
+            guard let self = self else { return }
+            // Each client's onClose was sent before this point; drop any registration left over
+            for conn in conns where self.connections[conn.uuid]?.conn === conn {
+                self.connections.removeValue(forKey: conn.uuid)
+            }
+            self.sendEvent(["addr": "0.0.0.0", "port": port], to: stopCallbackId, keepCallback: false)
+        }
     }
 
     @objc public func send(_ command: CDVInvokedUrlCommand) {
@@ -732,8 +704,7 @@ private class WSServer {
             #endif
             return
         }
-        let wsConn = syncQueue.sync { connections[uuid] }
-        guard let wsConn = wsConn else {
+        guard let wsConn = connections[uuid]?.conn else {
             #if DEBUG
             print("WebSocketServer: Send: unknown socket.")
             #endif
@@ -753,8 +724,7 @@ private class WSServer {
             #endif
             return
         }
-        let wsConn = syncQueue.sync { connections[uuid] }
-        guard let wsConn = wsConn else {
+        guard let wsConn = connections[uuid]?.conn else {
             #if DEBUG
             print("WebSocketServer: Send: unknown socket.")
             #endif
@@ -774,13 +744,11 @@ private class WSServer {
         let reason = command.argument(at: 2) as? String
 
         if code != -1 && !WSConnection.isValidCloseCode(code) {
-            let r = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: "Invalid close code: \(code)")
-            commandDelegate?.send(r, callbackId: command.callbackId)
+            sendError("Invalid close code: \(code)", to: command.callbackId)
             return
         }
 
-        let wsConn = syncQueue.sync { connections[uuid] }
-        guard let wsConn = wsConn else {
+        guard let wsConn = connections[uuid]?.conn else {
             #if DEBUG
             print("WebSocketServer: Close: unknown socket.")
             #endif
@@ -794,89 +762,87 @@ private class WSServer {
         }
     }
 
-    // MARK: - WSConnectionDelegate
+    // MARK: - WSConnectionDelegate (called on the server's queue)
 
-    fileprivate func handleWebSocketDidOpen(_ wsConn: WSConnection) {
+    private func handleWebSocketDidOpen(_ wsConn: WSConnection, protocols: [String]?, callbackId: String) {
         #if DEBUG
         print("WebSocketServer: WebSocket did open")
         #endif
 
-        syncQueue.sync {
-            for closedUUID in didCloseUUIDs {
-                connections.removeValue(forKey: closedUUID)
-            }
-            didCloseUUIDs.removeAll()
-            connections[wsConn.uuid] = wsConn
-        }
-
-        wsConn.delegate = self
+        connections[wsConn.uuid] = Registration(conn: wsConn, callbackId: callbackId)
 
         let request = wsConn.urlRequest
-        let acceptedProtocol = protocols != nil ? (getAcceptedProtocol(request) ?? "") : ""
-        let httpFields = request.allHTTPHeaderFields ?? [:]
-
+        let acceptedProtocol = protocols.flatMap { WebSocketServer.acceptedProtocol(request, supported: $0) } ?? ""
         let conn: [String: Any] = [
             "uuid": wsConn.uuid,
             "remoteAddr": wsConn.remoteHost,
             "acceptedProtocol": acceptedProtocol,
-            "httpFields": httpFields,
+            "httpFields": request.allHTTPHeaderFields ?? [:],
             "resource": wsConn.resource
         ]
-        let status: [String: Any] = ["action": "onOpen", "conn": conn]
-        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-        result?.setKeepCallbackAs(true)
-        commandDelegate?.send(result, callbackId: startCallbackId)
+        sendEvent(["action": "onOpen", "conn": conn], to: callbackId)
     }
 
     func connection(_ conn: WSConnection, didReceiveText text: String) {
-        #if DEBUG
-        print("WebSocketServer: Websocket did receive text message")
-        #endif
-        let status: [String: Any] = ["action": "onMessage", "uuid": conn.uuid, "msg": text, "is_binary": false]
-        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-        result?.setKeepCallbackAs(true)
-        commandDelegate?.send(result, callbackId: startCallbackId)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let registration = self.registration(of: conn) else { return }
+            self.sendEvent(["action": "onMessage", "uuid": conn.uuid, "msg": text, "is_binary": false], to: registration.callbackId)
+        }
     }
 
     func connection(_ conn: WSConnection, didReceiveBinary data: Data) {
-        #if DEBUG
-        print("WebSocketServer: Websocket did receive binary message")
-        #endif
         let b64 = data.base64EncodedString()
-        let status: [String: Any] = ["action": "onMessage", "uuid": conn.uuid, "msg": b64, "is_binary": true]
-        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-        result?.setKeepCallbackAs(true)
-        commandDelegate?.send(result, callbackId: startCallbackId)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let registration = self.registration(of: conn) else { return }
+            self.sendEvent(["action": "onMessage", "uuid": conn.uuid, "msg": b64, "is_binary": true], to: registration.callbackId)
+        }
     }
 
     func connection(_ conn: WSConnection, didCloseWithCode code: Int, reason: String, wasClean: Bool) {
-        #if DEBUG
-        print("WebSocketServer: WebSocket did close with code: \(code), reason: \(reason), wasClean: \(wasClean)")
-        #endif
-        syncQueue.sync {
-            didCloseUUIDs.append(conn.uuid)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let registration = self.registration(of: conn) else { return }
+            #if DEBUG
+            print("WebSocketServer: WebSocket did close with code: \(code), reason: \(reason), wasClean: \(wasClean)")
+            #endif
+            self.connections.removeValue(forKey: conn.uuid)
+            let status: [String: Any] = ["action": "onClose", "uuid": conn.uuid, "code": code, "reason": reason, "wasClean": wasClean]
+            self.sendEvent(status, to: registration.callbackId)
         }
-
-        let status: [String: Any] = ["action": "onClose", "uuid": conn.uuid, "code": code, "reason": reason, "wasClean": wasClean]
-        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
-        result?.setKeepCallbackAs(true)
-        commandDelegate?.send(result, callbackId: startCallbackId)
     }
 
     // MARK: - Helpers
 
+    /// The registration of `conn`, if it is still the connection JS knows under its uuid.
+    private func registration(of conn: WSConnection) -> Registration? {
+        guard let registration = connections[conn.uuid], registration.conn === conn else { return nil }
+        return registration
+    }
+
+    /// Removes and returns the connections whose events go to `callbackId`.
+    private func removeConnections(of callbackId: String) -> [WSConnection] {
+        let owned = connections.values.filter { $0.callbackId == callbackId }
+        for registration in owned { connections.removeValue(forKey: registration.conn.uuid) }
+        return owned.map { $0.conn }
+    }
+
     /// Closes every client with 1001 and stops the listener. Runs on the server's queue, so each
-    /// client's onClose is sent before the listener reports it stopped (matching Android).
-    /// With `detach`, the old server and its connections are cut off from the plugin first, so
-    /// none of their late events reach JS or the plugin's state (used after a page reset).
-    private func shutdown(_ server: WSServer, connections conns: [WSConnection], detach: Bool) {
+    /// client's onClose is sent before `completion` (matching Android, where onClose events come
+    /// before the stop result). `completion` gets the port the server was listening on and runs on
+    /// the main thread. With `detach`, the clients are cut off from the plugin first, so none of
+    /// their events reach JS (used after a page reset or a server failure).
+    private func shutdown(_ server: WSServer, connections conns: [WSConnection], detach: Bool, completion: ((Int) -> Void)? = nil) {
         server.queue.async {
-            if detach {
-                server.onDidStart = nil
+            server.onDidStart = nil
+            server.onDidFail = nil
+            server.onShouldAccept = { _ in (false, [:]) }
+            let port = Int(server.realPort != 0 ? server.realPort : server.port)
+            // The closure holds the server strongly so it (and its listener) stays alive until
+            // the listener reports it is cancelled; clearing it then breaks the cycle.
+            server.onDidStop = { _ in
                 server.onDidStop = nil
-                server.onDidFail = nil
-                server.onWebSocketDidOpen = nil
-                server.onShouldAccept = { _ in (false, [:]) }
+                if let completion = completion {
+                    DispatchQueue.main.async { completion(port) }
+                }
             }
             for conn in conns {
                 if detach { conn.delegate = nil }
@@ -886,12 +852,42 @@ private class WSServer {
         }
     }
 
-    private func getAcceptedProtocol(_ request: URLRequest) -> String? {
-        guard let secProto = request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol") else { return nil }
-        let requested = secProto.components(separatedBy: ", ")
-        for p in requested {
-            if protocols!.contains(p) { return p }
+    private func sendEvent(_ status: [String: Any], to callbackId: String, keepCallback: Bool = true) {
+        let result = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: status)
+        result?.setKeepCallbackAs(keepCallback)
+        commandDelegate?.send(result, callbackId: callbackId)
+    }
+
+    private func sendError(_ message: String, to callbackId: String) {
+        let result = CDVPluginResult(status: CDVCommandStatus_ERROR, messageAs: message)
+        commandDelegate?.send(result, callbackId: callbackId)
+    }
+
+    private static func shouldAccept(_ request: URLRequest, origins: [String]?, protocols: [String]?) -> (accepted: Bool, responseHeaders: [String: String]) {
+        if let origins = origins {
+            guard let origin = request.value(forHTTPHeaderField: "Origin"), origins.contains(origin) else {
+                #if DEBUG
+                print("WebSocketServer: Origin denied")
+                #endif
+                return (false, [:])
+            }
         }
-        return nil
+        guard let protocols = protocols else { return (true, [:]) }
+        guard let accepted = acceptedProtocol(request, supported: protocols) else {
+            #if DEBUG
+            print("WebSocketServer: Sec-WebSocket-Protocol denied")
+            #endif
+            return (false, [:])
+        }
+        return (true, ["Sec-WebSocket-Protocol": accepted])
+    }
+
+    /// The first protocol offered by the client that the server supports. The header is a
+    /// comma-separated list, with or without spaces ("a, b" or "a,b").
+    private static func acceptedProtocol(_ request: URLRequest, supported: [String]) -> String? {
+        guard let header = request.value(forHTTPHeaderField: "Sec-WebSocket-Protocol") else { return nil }
+        return header.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { supported.contains($0) }
     }
 }
