@@ -10,13 +10,17 @@
     <keywords>cordova,plugin,network,websocket,server</keywords>
     <license>MIT</license>
 
+    <engines>
+        <!-- cordova-ios 6+ builds Swift plugins natively (no cordova-plugin-add-swift-support) -->
+        <engine name="cordova-ios" version=">=6.0.0" />
+    </engines>
+
     <platform name="android">
         <js-module src="www/wsserver.js" name="WebSocketServer">
             <clobbers target="cordova.plugins.wsserver" />
         </js-module>
         <config-file target="AndroidManifest.xml" parent="/manifest">
             <uses-permission android:name="android.permission.INTERNET" />
-            <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
         </config-file>
         <config-file target="res/xml/config.xml" parent="/*">
             <feature name="WebSocketServer">
@@ -44,7 +48,5 @@
         <!-- https://github.com/hibento/swift-netutils/blob/master/NetUtils/Interface.swift -->
         <source-file src="src/ios/Interface.swift" />
     </platform>
-
-    <dependency id="cordova-plugin-add-swift-support" version="2.0.2" />
 
 </plugin>

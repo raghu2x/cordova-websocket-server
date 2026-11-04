@@ -16,6 +16,7 @@ import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
 import org.apache.cordova.PluginResult;
 import org.apache.cordova.PluginResult.Status;
+import org.java_websocket.drafts.Draft;
 import org.java_websocket.drafts.Draft_6455;
 import org.java_websocket.extensions.IExtension;
 import org.java_websocket.protocols.IProtocol;
@@ -133,11 +134,14 @@ public class WebSocketServerPlugin extends CordovaPlugin {
                     WebSocketServerImpl newServer = null;
                     try {
                         if (protocols != null) {
-                            ArrayList<Draft_6455> drafts = new ArrayList<Draft_6455>();
+                            // One draft knowing every protocol: it picks the first server protocol
+                            // the client requested.
+                            ArrayList<IProtocol> knownProtocols = new ArrayList<IProtocol>();
                             for (String protocol : protocols) {
-                                drafts.add(new Draft_6455(Collections.<IExtension> emptyList(), Collections.<IProtocol> singletonList(new Protocol(protocol))));
+                                knownProtocols.add(new Protocol(protocol));
                             }
-                            newServer = new WebSocketServerImpl(port, (List) drafts);
+                            Draft draft = new Draft_6455(Collections.<IExtension> emptyList(), knownProtocols);
+                            newServer = new WebSocketServerImpl(port, Collections.singletonList(draft));
                         } else {
                             newServer = new WebSocketServerImpl(port);
                         }
