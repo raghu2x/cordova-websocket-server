@@ -1,6 +1,6 @@
 ## [Unreleased]
 
-- **Breaking:** requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`); iOS apps must set `deployment-target` to 15.0 or later (see README)
+- **Breaking:** requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`); iOS 15 or later; the plugin sets `deployment-target` 15.0 and `SwiftVersion` 5.0 by default (an app's own `config.xml` values take precedence)
 - Stop the server on page reload/navigation (`onReset`), so a new page can call `start()` again (both platforms)
 - [iOS] `stop()` now closes connected clients with code 1001 and reports `onClose` for each before the stop callback, as on Android
 - [iOS] Server-initiated `close()` performs the closing handshake: `onClose` reports the client's code with `wasClean: true` (1006 only if the client doesn't answer within 5 s); no data is sent after a close

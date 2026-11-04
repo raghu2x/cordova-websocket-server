@@ -131,11 +131,11 @@ wsserver.getInterfaces(function (result) {
 
 ### iOS deployment target
 
-The plugin requires iOS 15 or later. Default deployment targets are lower (iOS 11 on `cordova-ios` 6/7, iOS 13 on `cordova-ios` 8), so set it in your app's `config.xml`:
+The plugin requires iOS 15 or later. It sets `deployment-target` to `15.0` and `SwiftVersion` to `5.0` for you, because the `cordova-ios` 6/7 templates default to iOS 11 and set no Swift version. Preferences in your app's `config.xml` take precedence, so you can still choose a higher target; a value below `15.0` will make the build fail:
 
 ```xml
 <platform name="ios">
-    <preference name="deployment-target" value="15.0" />
+    <preference name="deployment-target" value="16.0" />
 </platform>
 ```
 

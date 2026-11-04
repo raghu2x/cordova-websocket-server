@@ -41,6 +41,11 @@
             <feature name="WebSocketServer">
                 <param name="ios-package" value="WebSocketServer" />
             </feature>
+            <!-- Defaults for the app's build settings. cordova-ios merges the app's config.xml
+                 over plugin changes, so an app can still set its own (higher) values.
+                 cordova-ios 6/7 templates set no SWIFT_VERSION at all, and default to iOS 11. -->
+            <preference name="SwiftVersion" value="5.0" />
+            <preference name="deployment-target" value="15.0" />
         </config-file>
         <source-file src="src/ios/WebSocketServer.swift" />
         <framework src="Foundation.framework" />
