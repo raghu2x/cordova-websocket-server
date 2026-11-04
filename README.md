@@ -1,5 +1,7 @@
 # cordova-websocket-server
 
+[![Build](https://github.com/raghu2x/cordova-websocket-server/actions/workflows/build.yml/badge.svg)](https://github.com/raghu2x/cordova-websocket-server/actions/workflows/build.yml)
+
 A lightweight WebSocket Server plugin for Cordova applications.
 
 - Pure Swift implementation on iOS (no third-party libraries, uses `Network.framework`)

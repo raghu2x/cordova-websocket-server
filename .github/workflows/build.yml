@@ -1,0 +1,124 @@
+name: Build
+
+# Builds a throwaway Cordova app with this plugin installed, on the oldest supported and the
+# latest platform versions. This checks plugin.xml, the <engines> requirements, Gradle
+# dependencies and the native sources together, the way an app would consume them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js:
+    name: JS syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Check www/wsserver.js
+        run: node --check www/wsserver.js
+
+  android:
+    name: Android (cordova-android@${{ matrix.cordova-android }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cordova-android: ['14', '15']
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: plugin
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # cordova-android needs a Gradle on PATH to generate the project's Gradle wrapper
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.2'
+
+      - name: Install Cordova CLI
+        run: npm install -g cordova
+
+      - name: Create test app
+        run: |
+          cordova create app io.cordova.wsserver.test WSServerTest --no-telemetry
+          cd app
+          cordova platform add android@${{ matrix.cordova-android }} --no-telemetry
+          cordova plugin add ../plugin --no-telemetry
+
+      - name: Build
+        working-directory: app
+        run: cordova build android --debug --no-telemetry
+
+  ios:
+    name: iOS (cordova-ios@${{ matrix.cordova-ios }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cordova-ios: ['6', '8']
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: plugin
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Install Cordova CLI
+        run: npm install -g cordova
+
+      - name: Create test app
+        run: |
+          cordova create app io.cordova.wsserver.test WSServerTest --no-telemetry
+          cd app
+          # Same setup the README asks apps to do: the plugin requires iOS 15
+          perl -0pi -e 's#</widget>#    <platform name="ios">\n        <preference name="deployment-target" value="15.0" />\n    </platform>\n</widget>#' config.xml
+          cordova platform add ios@${{ matrix.cordova-ios }} --no-telemetry
+          cordova plugin add ../plugin --no-telemetry
+          cordova prepare ios --no-telemetry
+
+      # Build for the simulator with xcodebuild directly: no signing needed, and it avoids
+      # `cordova build --emulator` picking a named simulator that may not exist on the runner.
+      # The workspace is <AppName>.xcworkspace on cordova-ios 6/7 and App.xcworkspace on 8.
+      - name: Build
+        working-directory: app/platforms/ios
+        run: |
+          WORKSPACE=$(ls -d *.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          xcodebuild build \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
