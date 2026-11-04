@@ -7,6 +7,7 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.List;
 
 import org.apache.cordova.CallbackContext;
@@ -37,6 +38,8 @@ public class WebSocketServerPlugin extends CordovaPlugin {
     public static final String ACTION_SEND_BINARY = "send_binary";
     public static final String ACTION_CLOSE = "close";
 
+    private static final int STOP_TIMEOUT_MS = 2000;
+
     @Override
     protected void pluginInitialize() {
         Log.v(TAG, "Initialized");
@@ -46,30 +49,27 @@ public class WebSocketServerPlugin extends CordovaPlugin {
     public void onReset() {
         // Page reload or navigation: the JS that started the server is gone, and a new
         // page calling start() would otherwise get "Server already running."
-        final WebSocketServerImpl oldServer = wsserver;
-        wsserver = null;
-        if (oldServer != null) {
-            cordova.getThreadPool().execute(() -> {
-                try {
-                    oldServer.stop(2000);
-                } catch (InterruptedException e) {
-                    Log.e(TAG, e.getMessage(), e);
-                }
-            });
-        }
+        stopServerInBackground();
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (wsserver != null) {
-            try {
-                wsserver.stop();
-            } catch (InterruptedException e) {
-                Log.e(TAG, e.getMessage(), e);
-            } finally {
-                wsserver = null;
-            }
+        // onDestroy runs on the UI thread; stopping inline could block it (ANR)
+        stopServerInBackground();
+    }
+
+    private void stopServerInBackground() {
+        final WebSocketServerImpl oldServer = wsserver;
+        wsserver = null;
+        if (oldServer != null) {
+            cordova.getThreadPool().execute(() -> {
+                try {
+                    oldServer.stop(STOP_TIMEOUT_MS);
+                } catch (InterruptedException e) {
+                    Log.e(TAG, e.getMessage(), e);
+                }
+            });
         }
     }
 
@@ -101,86 +101,69 @@ public class WebSocketServerPlugin extends CordovaPlugin {
 
             if (wsserver != null) {
                 callbackContext.error("Server already running.");
-                return false;
+                return true;
             }
 
             final int port = args.optInt(0);
 
-            List<String> _origins = null;
-            List<String> _protocols = null;
-            Boolean _tcpNoDelay = null;
-
+            List<String> origins;
+            List<String> protocols;
             try {
-                _origins = jsonArrayToArrayList(args.optJSONArray(1));
+                origins = jsonArrayToArrayList(args.optJSONArray(1));
             } catch (JSONException e) {
                 Log.e(TAG, e.getMessage(), e);
                 callbackContext.error("Origins option error");
-                return false;
+                return true;
             }
             try {
-                _protocols = jsonArrayToArrayList(args.optJSONArray(2));
+                protocols = jsonArrayToArrayList(args.optJSONArray(2));
             } catch (JSONException e) {
                 Log.e(TAG, e.getMessage(), e);
                 callbackContext.error("Protocols option error");
-                return false;
+                return true;
+            }
+
+            // Created and assigned on this (the JS bridge) thread, so an immediately following
+            // start() or stop() sees it. Neither the constructor nor start() blocks: binding
+            // happens on the server's own thread, which reports onStart/onError.
+            WebSocketServerImpl newServer;
+            try {
+                if (protocols != null) {
+                    // One draft knowing every protocol: it picks the first server protocol
+                    // the client requested.
+                    ArrayList<IProtocol> knownProtocols = new ArrayList<>();
+                    for (String protocol : protocols) {
+                        knownProtocols.add(new Protocol(protocol));
+                    }
+                    Draft draft = new Draft_6455(Collections.<IExtension> emptyList(), knownProtocols);
+                    newServer = new WebSocketServerImpl(port, Collections.singletonList(draft));
+                } else {
+                    newServer = new WebSocketServerImpl(port);
+                }
+            } catch (IllegalArgumentException e) {
+                Log.e(TAG, e.getMessage(), e);
+                callbackContext.error("Port number error");
+                return true;
+            }
+
+            newServer.setCallbackContext(callbackContext);
+            if (origins != null) {
+                newServer.setOrigins(origins);
             }
             if (!args.isNull(3)) {
-                _tcpNoDelay = Boolean.valueOf(args.optBoolean(3));
+                newServer.setTcpNoDelay(args.optBoolean(3));
             }
+            // allow an immediate restart on the same port (socket may still be in TIME_WAIT)
+            newServer.setReuseAddr(true);
 
-            final List<String> origins = _origins;
-            final List<String> protocols = _protocols;
-            final Boolean tcpNoDelay = _tcpNoDelay;
-
-            cordova.getThreadPool().execute(() -> {
-                WebSocketServerImpl newServer = null;
-                try {
-                    if (protocols != null) {
-                        // One draft knowing every protocol: it picks the first server protocol
-                        // the client requested.
-                        ArrayList<IProtocol> knownProtocols = new ArrayList<>();
-                        for (String protocol : protocols) {
-                            knownProtocols.add(new Protocol(protocol));
-                        }
-                        Draft draft = new Draft_6455(Collections.<IExtension> emptyList(), knownProtocols);
-                        newServer = new WebSocketServerImpl(port, Collections.singletonList(draft));
-                    } else {
-                        newServer = new WebSocketServerImpl(port);
-                    }
-                    newServer.setCallbackContext(callbackContext);
-                } catch (IllegalArgumentException e) {
-                    Log.e(TAG, e.getMessage(), e);
-                    callbackContext.error("Port number error");
-                    return;
-                }
-
-                if (origins != null) {
-                    newServer.setOrigins(origins);
-                }
-
-                if (tcpNoDelay != null) {
-                    newServer.setTcpNoDelay(tcpNoDelay);
-                }
-
-                // allow an immediate restart on the same port (socket may still be in TIME_WAIT)
-                newServer.setReuseAddr(true);
-
-                try {
-                    newServer.start();
-                } catch (IllegalStateException e) {
-                    Log.e(TAG, e.getMessage(), e);
-                    callbackContext.error("Can only be started once.");
-                    return;
-                }
-
-                wsserver = newServer;
-            });
+            wsserver = newServer;
+            newServer.start();
 
         } else if (ACTION_STOP.equals(action)) {
 
             if (wsserver == null) {
                 callbackContext.error("Server is not running.");
-                return false;
+                return true;
             }
 
             final WebSocketServerImpl oldServer = wsserver;
@@ -188,7 +171,7 @@ public class WebSocketServerPlugin extends CordovaPlugin {
 
             cordova.getThreadPool().execute(() -> {
                 try {
-                    oldServer.stop(2000);
+                    oldServer.stop(STOP_TIMEOUT_MS);
                 } catch (InterruptedException e) {
                     Log.e(TAG, e.getMessage(), e);
                     callbackContext.error("Error: " + e.getMessage());
@@ -222,7 +205,7 @@ public class WebSocketServerPlugin extends CordovaPlugin {
                 }
             } else {
                 callbackContext.error("UUID or msg not specified.");
-                return false;
+                return true;
             }
 
         } else if (ACTION_CLOSE.equals(action)) {
@@ -240,12 +223,12 @@ public class WebSocketServerPlugin extends CordovaPlugin {
                 }
             } else {
                 callbackContext.error("UUID not specified.");
-                return false;
+                return true;
             }
 
         } else {
+            // returning false makes Cordova report INVALID_ACTION to the caller
             Log.w(TAG, "Invalid action: " + action);
-            callbackContext.error("Invalid action: " + action);
             return false;
         }
 
@@ -270,7 +253,12 @@ public class WebSocketServerPlugin extends CordovaPlugin {
         JSONArray ipv4Addresses;
         JSONArray ipv6Addresses;
 
-        List<NetworkInterface> intfs = Collections.list(NetworkInterface.getNetworkInterfaces());
+        // null when the device has no network interfaces
+        Enumeration<NetworkInterface> networkInterfaces = NetworkInterface.getNetworkInterfaces();
+        if (networkInterfaces == null) {
+            return obj;
+        }
+        List<NetworkInterface> intfs = Collections.list(networkInterfaces);
         for (NetworkInterface intf : intfs) {
             if (!intf.isLoopback()) {
                 intfobj = new JSONObject();
