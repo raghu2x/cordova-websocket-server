@@ -15,7 +15,6 @@ import org.java_websocket.server.WebSocketServer;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -40,9 +39,9 @@ public class WebSocketServerImpl extends WebSocketServer {
     private List<String> origins;
 
     // Accessed from Java-WebSocket worker threads and from the plugin's command threads.
-    private final Map<String, WebSocket> UUIDSockets = new ConcurrentHashMap<String, WebSocket>();
+    private final Map<String, WebSocket> UUIDSockets = new ConcurrentHashMap<>();
 
-    private final Map<WebSocket, String> socketsUUID = new ConcurrentHashMap<WebSocket, String>();
+    private final Map<WebSocket, String> socketsUUID = new ConcurrentHashMap<>();
 
     public WebSocketServerImpl(int port) {
         super(new InetSocketAddress(port));
@@ -245,13 +244,7 @@ public class WebSocketServerImpl extends WebSocketServer {
                 try {
                     // normally already stopped. just making sure!
                     this.stop();
-                } catch (IOException e) {
-                    // fail silently
-                    Log.e(WebSocketServerPlugin.TAG, e.getMessage(), e);
-                } catch (InterruptedException e) {
-                    // fail silently
-                    Log.e(WebSocketServerPlugin.TAG, e.getMessage(), e);
-                } catch (RuntimeException e) {
+                } catch (InterruptedException | RuntimeException e) {
                     // fail silently
                     Log.e(WebSocketServerPlugin.TAG, e.getMessage(), e);
                 }

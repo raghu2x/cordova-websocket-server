@@ -11,6 +11,7 @@
     <license>MIT</license>
 
     <engines>
+        <engine name="cordova-android" version=">=14.0.0" />
         <!-- cordova-ios 6+ builds Swift plugins natively (no cordova-plugin-add-swift-support) -->
         <engine name="cordova-ios" version=">=6.0.0" />
     </engines>
@@ -43,7 +44,7 @@
         </config-file>
         <source-file src="src/ios/WebSocketServer.swift" />
         <framework src="Foundation.framework" />
-        <framework src="Security.framework" />
+        <framework src="CryptoKit.framework" />
         <framework src="Network.framework" />
         <!-- https://github.com/hibento/swift-netutils/blob/master/NetUtils/Interface.swift -->
         <source-file src="src/ios/Interface.swift" />
