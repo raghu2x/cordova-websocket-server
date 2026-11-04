@@ -1,7 +1,11 @@
 import Foundation
 import Network
 import CryptoKit
+// cordova-ios 8+ builds CordovaLib as a module. On cordova-ios 6/7 it isn't one, and the
+// app's Bridging-Header.h (#import <Cordova/CDV.h>) exposes CDVPlugin etc. to Swift instead.
+#if canImport(Cordova)
 import Cordova
+#endif
 
 // MARK: - WebSocket Frame Opcodes
 private enum WSOpcode: UInt8 {
