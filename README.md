@@ -6,7 +6,7 @@ A lightweight WebSocket Server plugin for Cordova applications.
 
 - Pure Swift implementation on iOS (no third-party libraries, uses `Network.framework`)
 - Java implementation on Android (uses [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket))
-- Not a background service — the server stops when the Cordova view is destroyed
+- Not a background service — the server stops when the Cordova view is destroyed, or when the page reloads or navigates away
 
 ## Installation
 
@@ -71,7 +71,7 @@ wsserver.start(
 
 ### `stop(success, failure)`
 
-Stops the server and closes all connections.
+Stops the server and closes all connections with code `1001` (going away). `onClose` is called for each connection before the success callback, and `start()` can be called again right away.
 
 ```javascript
 wsserver.stop(function (addr, port) {
@@ -98,7 +98,11 @@ wsserver.send(conn, Uint8Array.from([1, 2, 3, 4]));
 
 ### `close(conn, code, reason)`
 
-Closes a connection. Code and reason are optional.
+Closes a connection. Code and reason are optional; without a code, the connection is closed with `1000` (normal closure).
+
+- `code` must be a valid WebSocket close code: `1000`–`1003`, `1007`–`1014` or `3000`–`4999` (`4000`–`4999` are free for application use). On iOS, other codes are rejected with an error.
+- `reason` is limited to 123 bytes of UTF-8 by the protocol; longer reasons are truncated on iOS.
+- `onClose` is called when the client has answered the close (or the connection drops), with the code the client sent back.
 
 ```javascript
 wsserver.close(conn, 4000, 'bye');
@@ -128,6 +132,11 @@ wsserver.getInterfaces(function (result) {
 | -------- | ----------------- | -------------- | --------------------------------------------------------------- |
 | iOS      | `cordova-ios` 6+  | iOS 15.0       | Pure Swift (`Network.framework`)                                |
 | Android  | `cordova-android` 14+ | Android 7.0 (API 24) | [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket) |
+
+### Limits
+
+- **iOS:** incoming messages are limited to 16 MiB (a single frame, or all fragments of one message together). A larger message closes the connection with code `1009` (message too big).
+- Messages are passed between native code and JavaScript through the Cordova bridge; binary messages are Base64-encoded on the way, which adds about 33% overhead. Very large or very frequent messages are better split up.
 
 ### iOS deployment target
 

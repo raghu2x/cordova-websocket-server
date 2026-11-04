@@ -1,38 +1,55 @@
-## [Unreleased]
+## [2.0.0] - 2026-11-04
 
-- **Breaking:** requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`); iOS 15 or later; the plugin sets `deployment-target` 15.0 and `SwiftVersion` 5.0 by default (an app's own `config.xml` values take precedence)
-- Stop the server on page reload/navigation (`onReset`), so a new page can call `start()` again (both platforms)
-- [iOS] `stop()` now closes connected clients with code 1001 and reports `onClose` for each before the stop callback, as on Android
-- [iOS] Server-initiated `close()` performs the closing handshake: `onClose` reports the client's code with `wasClean: true` (1006 only if the client doesn't answer within 5 s); no data is sent after a close
-- [iOS] `resource` is the full request target (e.g. `/?param1=value1`) instead of only the query string, matching Android and the README
-- [Android] `close(conn, code)` without a reason no longer sends the reason `"null"`
-- [Android] `onOpen` now includes `acceptedProtocol`, as documented
-- [Android] Enable address reuse so the server can restart on the same port immediately
-- [Android] Fix `start()`/`stop()` race: the server is created and registered before `start()` returns, so an immediate `stop()` or second `start()` sees it
-- [Android] `onDestroy` no longer stops the server on the UI thread (possible ANR)
-- [Android] `getInterfaces` returns an empty result instead of crashing on devices without network interfaces
-- [Android] Error results are no longer followed by a second `INVALID_ACTION` result
-- [iOS] Fix data races: plugin state is now only touched on the main thread, and the server's listener only on its own queue (a `stop()` right after `start()` could leave the port bound)
-- [iOS] A server that fails to start no longer sends a result to an earlier `stop()` call's callback; each server's events go only to the callback of the `start()` that created it
-- [iOS] `stop()` frees the plugin immediately for a new `start()`, as on Android, and its result reports the actual port when started on port 0
-- [iOS] Closed connections are removed right away instead of when the next client connects
-- [iOS] Subprotocol negotiation accepts `a,b` and extra spaces, and repeated `Sec-WebSocket-Protocol` headers
-- [iOS] A connection no longer stops reading after an empty or short read from the network
-- [iOS] Fix build on `cordova-ios` 6/7 (`unable to resolve module dependency: 'Cordova'`): `Cordova` is only imported where it is a module; older versions expose it through the app's bridging header. Also builds on `cordova-ios` 8, whose stricter Swift annotations made `CDVPluginResult` non-optional
-- [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
+### Breaking changes
+
+- Requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`), and iOS 15 or later. The plugin sets the iOS `deployment-target` to 15.0 and `SwiftVersion` to 5.0 by default; an app's own `config.xml` values take precedence
+- [iOS] Dropped the `cordova-plugin-add-swift-support` dependency (`cordova-ios` 6+ builds Swift plugins natively)
+- [Android] Removed the unused `ACCESS_WIFI_STATE` permission
+
+### Build fixes
+
 - [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
-- [Android] Replace deprecated `initialize()` override with `pluginInitialize()`
 - [iOS] Fix compile error in `onClose` handling (undeclared `lock`)
-- [iOS] Fix out-of-bounds read and NULL-pointer crashes in `getInterfaces`; IPv6 link-local addresses now include the scope (e.g. `fe80::1%en0`), as on Android
-- [iOS] Reject invalid close codes and truncate close reasons to 123 bytes
-- [iOS] Cap incoming messages at 16 MiB (connection closed with code 1009) and fix crash on oversized 64-bit frame lengths
+- [iOS] Builds on `cordova-ios` 6/7 (`unable to resolve module dependency: 'Cordova'`: `Cordova` is only imported where it is a module) and on `cordova-ios` 8 (stricter Swift annotations made `CDVPluginResult` non-optional)
+
+### Fixed: both platforms
+
+- Stop the server on page reload/navigation (`onReset`), so the new page can call `start()` again
+- Messages and close requests are delivered in the order they were sent
+
+### Fixed: Android
+
+- Race conditions on the connection maps, and `NullPointerException`s after a server failure
+- `start()`/`stop()` race: the server is created and registered before `start()` returns, so an immediate `stop()` or second `start()` sees it
+- `onDestroy` no longer stops the server on the UI thread (possible ANR)
+- `close(conn, code)` without a reason no longer sends the reason `"null"`
+- `onOpen` now includes `acceptedProtocol`, as documented
+- Address reuse is enabled, so the server can restart on the same port immediately
+- `getInterfaces` returns an empty result instead of crashing on devices without network interfaces
+- Error results are no longer followed by a second `INVALID_ACTION` result
+
+### Fixed: iOS
+
+- Out-of-bounds read and NULL-pointer crashes in `getInterfaces`; IPv6 link-local addresses now include the scope (e.g. `fe80::1%en0`), as on Android
+- Crashes on invalid close codes from JS and on oversized 64-bit frame lengths from clients
+- Data races: plugin state is only touched on the main thread, and the listener only on its own queue (a `stop()` right after `start()` could leave the port bound)
+- A server that fails to start no longer sends a result to an earlier `stop()` call's callback; each server's events go only to the callback of the `start()` that created it
+- `stop()` closes connected clients with code 1001 and reports `onClose` for each before the stop callback, as on Android. It frees the plugin immediately for a new `start()`, and its result reports the actual port when started on port 0
+- Server-initiated `close()` performs the closing handshake: `onClose` reports the client's code with `wasClean: true` (1006 only if the client doesn't answer within 5 s); no data is sent after a close
+- `resource` is the full request target (e.g. `/?param1=value1`) instead of only the query string, matching Android
+- Closed connections are removed right away instead of when the next client connects
+- Subprotocol negotiation accepts `a,b`, extra spaces, and repeated `Sec-WebSocket-Protocol` headers
+- A connection no longer stops reading after an empty or short read from the network
+
+### Changed
+
+- [iOS] Incoming messages are limited to 16 MiB; larger ones close the connection with code 1009
+- [iOS] `close()` rejects invalid close codes with an error and truncates reasons to 123 bytes
+- [iOS] Use CryptoKit for the handshake accept key instead of the deprecated `CC_SHA1`; drop the unused `Security.framework`
 - [iOS] Faster unmasking of incoming frames
-- [iOS] Require `cordova-ios` >= 6.0.0; drop the `cordova-plugin-add-swift-support` dependency
-- [Android] Fix race conditions on connection maps and `NullPointerException`s after a server failure
 - [Android] Binary messages are Base64-encoded without line wrapping
 - [Android] Subprotocols are negotiated by a single draft; message bodies and HTTP headers are no longer logged
-- [Android] Remove unused `ACCESS_WIFI_STATE` permission
-- Messages and close requests are now delivered in the order they were sent (both platforms)
+- [Android] Replace the deprecated `initialize()` override with `pluginInitialize()`
 - [JS] `start()` accepts a missing `options` argument; `send()` handles typed-array views correctly and encodes large buffers faster
 
 ## [1.1.0] - 2026-04-01
