@@ -30,7 +30,7 @@ public class WebSocketServerPlugin extends CordovaPlugin {
 
     public static final String TAG = "WebSocketServer";
 
-    private WebSocketServerImpl wsserver = null;
+    private volatile WebSocketServerImpl wsserver = null;
 
     public static final String ACTION_GET_INTERFACES = "getInterfaces";
     public static final String ACTION_START = "start";
@@ -208,14 +208,12 @@ public class WebSocketServerPlugin extends CordovaPlugin {
             final String uuid = args.optString(0);
             final String msg = args.optString(1);
             if (uuid != null && msg != null) {
-                this.cordova.getThreadPool().execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (wsserver != null) {
-                            wsserver.send(uuid, msg, ACTION_SEND_BINARY.equals(action));
-                        }
-                    }
-                });
+                // WebSocket.send() only queues the frame, so call it directly: dispatching to
+                // the (multi-threaded) Cordova pool could reorder consecutive messages.
+                WebSocketServerImpl server = wsserver;
+                if (server != null) {
+                    server.send(uuid, msg, ACTION_SEND_BINARY.equals(action));
+                }
             } else {
                 callbackContext.error("UUID or msg not specified.");
                 return false;
@@ -228,14 +226,11 @@ public class WebSocketServerPlugin extends CordovaPlugin {
             final String reason = args.optString(2);
 
             if (uuid != null) {
-                this.cordova.getThreadPool().execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (wsserver != null) {
-                            wsserver.close(uuid, code, reason);
-                        }
-                    }
-                });
+                // Same thread as send() so a close is ordered after any preceding sends.
+                WebSocketServerImpl server = wsserver;
+                if (server != null) {
+                    server.close(uuid, code, reason);
+                }
             } else {
                 callbackContext.error("UUID not specified.");
                 return false;

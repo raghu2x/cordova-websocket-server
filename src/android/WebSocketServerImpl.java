@@ -19,11 +19,11 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class WebSocketServerImpl extends WebSocketServer {
 
@@ -33,15 +33,16 @@ public class WebSocketServerImpl extends WebSocketServer {
             CloseFrame.REFUSE, CloseFrame.TLS_ERROR, CloseFrame.TOOBIG, CloseFrame.UNEXPECTED_CONDITION,
             CloseFrame.SERVICE_RESTART, CloseFrame.TRY_AGAIN_LATER, CloseFrame.BAD_GATEWAY };
 
-    public boolean failed = false;
+    public volatile boolean failed = false;
 
-    private CallbackContext callbackContext;
+    private volatile CallbackContext callbackContext;
 
     private List<String> origins;
 
-    private Map<String, WebSocket> UUIDSockets = new HashMap<String, WebSocket>();
+    // Accessed from Java-WebSocket worker threads and from the plugin's command threads.
+    private final Map<String, WebSocket> UUIDSockets = new ConcurrentHashMap<String, WebSocket>();
 
-    private Map<WebSocket, String> socketsUUID = new HashMap<WebSocket, String>();
+    private final Map<WebSocket, String> socketsUUID = new ConcurrentHashMap<WebSocket, String>();
 
     public WebSocketServerImpl(int port) {
         super(new InetSocketAddress(port));
@@ -85,12 +86,11 @@ public class WebSocketServerImpl extends WebSocketServer {
     public void onOpen(WebSocket webSocket, ClientHandshake clientHandshake) {
         Log.v(WebSocketServerPlugin.TAG, "onopen");
 
-        String uuid = null;
-        while (uuid == null || UUIDSockets.containsKey(uuid)) {
+        String uuid;
+        do {
             // prevent collision
             uuid = UUID.randomUUID().toString();
-        }
-        UUIDSockets.put(uuid, webSocket);
+        } while (UUIDSockets.putIfAbsent(uuid, webSocket) != null);
         socketsUUID.put(webSocket, uuid);
 
         try {
@@ -272,10 +272,10 @@ public class WebSocketServerImpl extends WebSocketServer {
                 callbackContext.error("Error: " + e.getMessage());
 
             } finally {
+                // Keep the maps and callback context: other worker threads may still be
+                // delivering onClose/onMessage. Late results on the finished callback are
+                // dropped by Cordova.
                 failed = true;
-                callbackContext = null;
-                UUIDSockets = null;
-                socketsUUID = null;
             }
 
         } else {
@@ -309,9 +309,9 @@ public class WebSocketServerImpl extends WebSocketServer {
     public void send(String uuid, String msg, boolean is_binary) {
         Log.v(WebSocketServerPlugin.TAG, "send");
 
-        WebSocket webSocket = UUIDSockets.get(uuid);
+        WebSocket webSocket = this.failed ? null : UUIDSockets.get(uuid);
 
-        if (webSocket != null && !this.failed) {
+        if (webSocket != null) {
             if (webSocket.isOpen()) {
                 if (!is_binary) {
                     // send text frame (websocket opcode 1)
@@ -336,9 +336,9 @@ public class WebSocketServerImpl extends WebSocketServer {
     public void close(String uuid, int code, String reason) {
         Log.v(WebSocketServerPlugin.TAG, "close");
 
-        WebSocket webSocket = UUIDSockets.get(uuid);
+        WebSocket webSocket = this.failed ? null : UUIDSockets.get(uuid);
 
-        if (webSocket != null && !this.failed) {
+        if (webSocket != null) {
             if (code == -1) {
                 webSocket.close(CloseFrame.NORMAL);
             } else {
