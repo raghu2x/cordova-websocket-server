@@ -8,6 +8,10 @@
 - [Android] `close(conn, code)` without a reason no longer sends the reason `"null"`
 - [Android] `onOpen` now includes `acceptedProtocol`, as documented
 - [Android] Enable address reuse so the server can restart on the same port immediately
+- [Android] Fix `start()`/`stop()` race: the server is created and registered before `start()` returns, so an immediate `stop()` or second `start()` sees it
+- [Android] `onDestroy` no longer stops the server on the UI thread (possible ANR)
+- [Android] `getInterfaces` returns an empty result instead of crashing on devices without network interfaces
+- [Android] Error results are no longer followed by a second `INVALID_ACTION` result
 - [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
 - [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
 - [Android] Replace deprecated `initialize()` override with `pluginInitialize()`
