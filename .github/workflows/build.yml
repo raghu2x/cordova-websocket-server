@@ -53,8 +53,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Accepts the SDK licenses so Gradle can download any missing platform or build-tools.
+      # The action's default package list includes the obsolete "tools" package, which no
+      # longer exists in the SDK repository and makes sdkmanager fail.
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       # cordova-android needs a Gradle on PATH to generate the project's Gradle wrapper
       - name: Setup Gradle
@@ -101,8 +107,8 @@ jobs:
         run: |
           cordova create app io.cordova.wsserver.test WSServerTest --no-telemetry
           cd app
-          # Same setup the README asks apps to do: the plugin requires iOS 15
-          perl -0pi -e 's#</widget>#    <platform name="ios">\n        <preference name="deployment-target" value="15.0" />\n    </platform>\n</widget>#' config.xml
+          # No app-side settings on purpose: the plugin itself must supply SwiftVersion and the
+          # iOS 15 deployment target (cordova-ios 6/7 templates set neither).
           cordova platform add ios@${{ matrix.cordova-ios }} --no-telemetry
           cordova plugin add ../plugin --no-telemetry
           cordova prepare ios --no-telemetry
