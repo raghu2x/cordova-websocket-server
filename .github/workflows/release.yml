@@ -1,5 +1,9 @@
 name: Release
 
+# Publishes to npm with Trusted Publishing (OIDC): no npm token is stored in the repo.
+# npmjs.com > package settings > Trusted Publisher must list this repository and the
+# workflow filename "release.yml" exactly (case-sensitive).
+
 on:
   push:
     tags:
@@ -14,7 +18,8 @@ jobs:
     name: Publish to npm & GitHub Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # create the GitHub Release
+      id-token: write # OIDC token for npm Trusted Publishing (also enables provenance)
 
     steps:
       - uses: actions/checkout@v6
@@ -25,19 +30,24 @@ jobs:
           node-version: lts/*
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify package.json version matches tag
+      # Trusted Publishing needs npm >= 11.5.1
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Verify package.json and plugin.xml versions match tag
         run: |
-          PKG_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION=${GITHUB_REF_NAME#v}
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "Version mismatch: package.json=$PKG_VERSION tag=$TAG_VERSION"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PLUGIN_VERSION=$(node -p "/<plugin[^>]*\sversion=\"([^\"]+)\"/.exec(require('fs').readFileSync('plugin.xml', 'utf8'))[1]")
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ] || [ "$PLUGIN_VERSION" != "$TAG_VERSION" ]; then
+            echo "Version mismatch: tag=$TAG_VERSION package.json=$PKG_VERSION plugin.xml=$PLUGIN_VERSION"
             exit 1
           fi
 
+      # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for a short-lived
+      # publish credential. Provenance is generated automatically.
       - name: Publish to npm
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
