@@ -1,6 +1,6 @@
 import Foundation
 import Network
-import CommonCrypto
+import CryptoKit
 import Cordova
 
 // MARK: - WebSocket Frame Opcodes
@@ -430,10 +430,8 @@ private class WSServer {
     }
 
     private func makeAcceptKey(_ clientKey: String) -> String {
-        let combined = clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-        guard let data = combined.data(using: .utf8) else { return "" }
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-        data.withUnsafeBytes { _ = CC_SHA1($0.baseAddress, CC_LONG(data.count), &digest) }
+        // SHA-1 is mandated by RFC 6455 for the accept key; it is not used for security here.
+        let digest = Insecure.SHA1.hash(data: Data((clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))
         return Data(digest).base64EncodedString()
     }
 

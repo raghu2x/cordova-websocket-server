@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+- **Breaking:** requires `cordova-android` >= 14.0.0 and `cordova-ios` >= 6.0.0 (enforced via `<engines>`); iOS apps must set `deployment-target` to 15.0 or later (see README)
+- [iOS] Use CryptoKit for the handshake accept key instead of deprecated `CC_SHA1`; drop unused `Security.framework`
+- [Android] Fix build failure with `Java-WebSocket` 1.6.0 (`stop()` no longer throws `IOException`), broken since 1.1.0
+- [Android] Replace deprecated `initialize()` override with `pluginInitialize()`
 - [iOS] Fix compile error in `onClose` handling (undeclared `lock`)
 - [iOS] Fix out-of-bounds read and NULL-pointer crashes in `getInterfaces`; IPv6 link-local addresses now include the scope (e.g. `fe80::1%en0`), as on Android
 - [iOS] Reject invalid close codes and truncate close reasons to 123 bytes

@@ -122,10 +122,20 @@ wsserver.getInterfaces(function (result) {
 
 ## Platform Notes
 
-| Platform | Min Version | WebSocket Implementation                                        |
-| -------- | ----------- | --------------------------------------------------------------- |
-| iOS      | 12.0        | Pure Swift (`Network.framework`)                                |
-| Android  | —           | [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket) |
+| Platform | Cordova platform  | Min OS version | WebSocket Implementation                                        |
+| -------- | ----------------- | -------------- | --------------------------------------------------------------- |
+| iOS      | `cordova-ios` 6+  | iOS 15.0       | Pure Swift (`Network.framework`)                                |
+| Android  | `cordova-android` 14+ | Android 7.0 (API 24) | [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket) |
+
+### iOS deployment target
+
+The plugin requires iOS 15 or later. Default deployment targets are lower (iOS 11 on `cordova-ios` 6/7, iOS 13 on `cordova-ios` 8), so set it in your app's `config.xml`:
+
+```xml
+<platform name="ios">
+    <preference name="deployment-target" value="15.0" />
+</platform>
+```
 
 ## License
 
